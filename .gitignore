@@ -1,0 +1,16 @@
+# Virtual Environments
+venv/
+env/
+
+# Vector Database
+chroma_db_store/
+
+# Source Data (PDFs)
+textbooks/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Environment Variables
+.env
