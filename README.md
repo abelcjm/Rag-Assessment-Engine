@@ -1,4 +1,3 @@
-```markdown
 # RAG Assessment Engine - Setup & Replication Guide
 
 This repository contains the prototype Retrieval-Augmented Generation (RAG) backend designed for local document ingestion, vector storage, neural retrieval, and question generation. Follow this guide to replicate the environment, process academic literature, and run proof-of-concept generations.
