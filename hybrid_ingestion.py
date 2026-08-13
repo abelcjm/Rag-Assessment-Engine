@@ -1,8 +1,4 @@
 import os
-# Force PyTorch to disable C++ compilation on Windows BEFORE importing anything else
-os.environ["TORCH_COMPILE_DISABLE"] = "1"
-os.environ["TORCHDYNAMO_DISABLE"] = "1"
-
 import pymupdf 
 import tempfile
 from docling.document_converter import DocumentConverter
