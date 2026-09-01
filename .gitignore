@@ -18,3 +18,6 @@ __pycache__/
 # Exam Questions
 abnormal_psych_mock_exam.json
 abnormal_psych_blueprint.json
+
+# Evaluation
+ragas_evaluation_results.csv

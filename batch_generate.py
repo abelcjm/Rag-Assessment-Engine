@@ -1,8 +1,8 @@
 import json
 import os
 import time
-from generate_exam import generate_assessment_item
 from dotenv import load_dotenv
+from generate_exam import generate_assessment_item
 
 load_dotenv()
 
@@ -34,6 +34,8 @@ def run_batch_generation(blueprint_path, output_filename, selected_references=["
             print(f"  -> Generating item {i+1} of {count}...")
             
             try:
+                # generate_assessment_item now automatically performs enriched retrieval (top 5 chunks),
+                # prompts Gemini under strict grounding, and attaches the exact retrieved_contexts.
                 item = generate_assessment_item(
                     subject=subject,
                     competency=competency,
@@ -41,9 +43,18 @@ def run_batch_generation(blueprint_path, output_filename, selected_references=["
                     selected_references=selected_references
                 )
                 
-                mock_exam.append(item)
+                # Convert safely to dict if needed
+                if hasattr(item, 'model_dump'):
+                    item_dict = item.model_dump()
+                elif hasattr(item, 'dict'):
+                    item_dict = item.dict()
+                else:
+                    item_dict = dict(item)
+                
+                mock_exam.append(item_dict)
                 items_generated += 1
                 
+                # Pacing between item generations
                 time.sleep(2)
                 
             except Exception as e:
