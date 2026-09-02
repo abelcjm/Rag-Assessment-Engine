@@ -85,9 +85,9 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
     }}
     """
     
-    print(f"Generating item targeting {target_blooms_level} via Gemini 3.5 Flash-Lite...")
+    print(f"Generating item targeting {target_blooms_level} via Gemini 3.5 Flash...")
     response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
+        model="gemini-3.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json"

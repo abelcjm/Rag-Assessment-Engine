@@ -1,0 +1,7 @@
+configuration,trial,faithfulness,context_relevance,answer_relevancy
+gemini-3.1-flash-lite (strictness=1),1,0.5721013708513708,0.9375,0.7199040809365943
+gemini-3.1-flash-lite (strictness=1),2,0.58119227994228,0.9375,0.7199040809365943
+gemini-3.1-flash-lite (strictness=1),3,0.58119227994228,0.9375,0.7199040809365943
+gemini-3.5-flash-lite (strictness=1),1,0.4875,0.9125,0.7021880476635614
+gemini-3.5-flash-lite (strictness=1),2,0.5615277777777777,0.925,0.7055741409141634
+gemini-3.5-flash-lite (strictness=1),3,0.5526479076479076,0.8875,0.7064713647860505
