@@ -6,6 +6,18 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from sentence_transformers import CrossEncoder
 
 def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
+    """
+    Executes a two-stage retrieval pipeline: dense vector search followed by cross-encoder reranking.
+
+    Args:
+        query (str): Search query containing competency and diagnostic concepts.
+        top_k (int): Initial number of candidate chunks retrieved via cosine similarity.
+        final_k (int): Number of chunks retained after cross-encoder scoring.
+        reference_filter (list[str]): Specific source textbook filenames to filter metadata.
+
+    Returns:
+        list[Document]: Top ranked LangChain Document chunks.
+    """
     print(f"Step 1: Embedding query and retrieving initial {top_k} candidate chunks...")
     
     embedding_model = HuggingFaceEmbeddings(
@@ -18,6 +30,7 @@ def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
         embedding_function=embedding_model
     )
     
+    # Filter candidates by textbook name if specific references are selected
     search_filter = None
     if "All" not in reference_filter:
         search_filter = {"source": {"$in": reference_filter}}
@@ -33,6 +46,7 @@ def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
         print("\n--- Retrieval Warning: No chunks found matching query/filter. ---")
         return []
         
+    # Cross-encoder joint token-level evaluation handles fine-grained semantic relevance better than bi-encoder distance
     reranker_model = CrossEncoder('BAAI/bge-reranker-v2-m3')
     pairs = [[query, doc.page_content] for doc in initial_results]
     scores = reranker_model.predict(pairs)

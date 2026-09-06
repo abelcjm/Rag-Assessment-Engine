@@ -7,11 +7,29 @@ from generate_exam import generate_assessment_item
 load_dotenv()
 
 def load_blueprint(filepath):
-    """Loads the TOS blueprint JSON file."""
+    """
+    Loads and parses the Table of Specifications (TOS) examination blueprint.
+
+    Args:
+        filepath (str): Path to the blueprint JSON file.
+
+    Returns:
+        list[dict]: Array of competency requirements and generation targets.
+    """
     with open(filepath, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 def run_batch_generation(blueprint_path, output_filename, selected_references=["All"]):
+    """
+    Iterates through blueprint specifications to generate and validate exam items in batch.
+
+    Saves the aggregated results to an output JSON file.
+
+    Args:
+        blueprint_path (str): Filepath to the TOS blueprint JSON.
+        output_filename (str): Target filename for generated examination output.
+        selected_references (list[str]): Document filter list passed to retrieval.
+    """
     print(f"--- Starting Batch Generation: {blueprint_path} ---")
     blueprint = load_blueprint(blueprint_path)
     
@@ -34,8 +52,6 @@ def run_batch_generation(blueprint_path, output_filename, selected_references=["
             print(f"  -> Generating item {i+1} of {count}...")
             
             try:
-                # generate_assessment_item now automatically performs enriched retrieval (top 5 chunks),
-                # prompts Gemini under strict grounding, and attaches the exact retrieved_contexts.
                 item = generate_assessment_item(
                     subject=subject,
                     competency=competency,
@@ -43,7 +59,7 @@ def run_batch_generation(blueprint_path, output_filename, selected_references=["
                     selected_references=selected_references
                 )
                 
-                # Convert safely to dict if needed
+                # Normalize Pydantic models or dict outputs to a standard Python dictionary
                 if hasattr(item, 'model_dump'):
                     item_dict = item.model_dump()
                 elif hasattr(item, 'dict'):
@@ -54,7 +70,7 @@ def run_batch_generation(blueprint_path, output_filename, selected_references=["
                 mock_exam.append(item_dict)
                 items_generated += 1
                 
-                # Pacing between item generations
+                # Rate limit pacing to avoid Gemini API quota exhaustions
                 time.sleep(2)
                 
             except Exception as e:

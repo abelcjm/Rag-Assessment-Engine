@@ -5,26 +5,25 @@ import json
 import warnings
 from dotenv import load_dotenv
 
-# --- RAGAS DEPENDENCY FIXES ---
+# Mock uninstalled langchain_community VertexAI module to bypass Ragas legacy import validation
 dummy_chat = types.ModuleType("langchain_community.chat_models.vertexai")
 dummy_chat.ChatVertexAI = type("ChatVertexAI", (object,), {})
 sys.modules["langchain_community.chat_models.vertexai"] = dummy_chat
 
 warnings.filterwarnings("ignore")
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
-# ------------------------------
 
 from google import genai
 from google.genai import types as genai_types
 from retrieve_and_rerank import retrieve_and_rerank
 from datasets import Dataset
 
-# RAGAS Imports
 from ragas import evaluate
 from ragas.metrics import Faithfulness, AnswerRelevancy
 try:
     from ragas.metrics import ContextRelevance
 except ImportError:
+    # Support backward compatibility across older Ragas library versions
     from ragas.metrics import ContextRelevancy as ContextRelevance
 
 from ragas.run_config import RunConfig
@@ -33,11 +32,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# ==============================================================================
-# GLOBAL EVALUATOR INITIALIZATION
-# ==============================================================================
 API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
+# Evaluator LLM used exclusively for scoring validation criteria inside Ragas
 EVALUATOR_LLM = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite", 
     temperature=0.0,
@@ -46,23 +43,47 @@ EVALUATOR_LLM = ChatGoogleGenerativeAI(
     max_retries=3,
     timeout=60
 )
+
+# Aligned with ChromaDB embedding space to ensure semantic consistency during Ragas evaluation
 EMBEDDINGS = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"}
+    model_name="nomic-ai/nomic-embed-text-v1.5",
+    model_kwargs={'trust_remote_code': True, 'device': 'cpu'}
 )
+
 RAGAS_METRICS = [Faithfulness(), ContextRelevance(), AnswerRelevancy(strictness=1)]
 RUN_CONFIG = RunConfig(max_workers=1)
 
 def resolve_context_metric_value(df_row):
+    """
+    Extracts the context relevance metric value across varying Ragas schema conventions.
+
+    Args:
+        df_row (dict): Row dictionary from the evaluated Ragas DataFrame.
+
+    Returns:
+        float: Context relevance score or 0.0 if not found.
+    """
     for col in ["nv_context_relevance", "context_relevance", "context_relevancy"]:
         if col in df_row:
             return df_row[col]
     return 0.0
 
-# ==============================================================================
-# GENERATOR WITH RECALIBRATION LOOP
-# ==============================================================================
 def generate_assessment_item(subject, competency, target_blooms_level, selected_references=["All"]):
+    """
+    Generates a psychometric examination item using retrieval-augmented generation and Ragas evaluation.
+
+    If an item fails validation thresholds, the function adjusts retrieval window size (k)
+    and retries up to MAX_RETRIES. Returns the highest-scoring draft if thresholds are not met.
+
+    Args:
+        subject (str): Assessment subject area (e.g., 'Abnormal Psychology').
+        competency (str): Curricular competency statement to assess.
+        target_blooms_level (str): Cognitive depth target (e.g., 'Understanding', 'Applying').
+        selected_references (list[str]): Optional list of document sources to restrict search scope.
+
+    Returns:
+        dict: Generated item containing stem, options, rationale, citations, and evaluation metrics.
+    """
     if not API_KEY:
         raise ValueError("CRITICAL: GEMINI_API_KEY not found! Check your .env file.")
     
@@ -71,13 +92,15 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
     
     MAX_RETRIES = 2
     attempt = 0
-    current_final_k = 5  # Baseline
+    current_final_k = 5
+    
+    best_item = None
+    best_composite_score = -1.0
     
     while attempt <= MAX_RETRIES:
         print(f"\n--- Generation Cycle (Attempt {attempt + 1}/{MAX_RETRIES + 1}) ---")
         print(f"Retrieving enriched context for: '{competency}' (final_k={current_final_k})...")
         
-        # 1. Retrieval Stage
         best_chunks = retrieve_and_rerank(
             query=query, 
             top_k=12, 
@@ -85,7 +108,6 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
             reference_filter=selected_references
         )
         
-        # Fixed list unpacking: 3 variables matching 3 empty lists
         formatted_chunks, citations, raw_contexts = [], [], []
         
         for chunk in best_chunks:
@@ -107,7 +129,6 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
             
         retrieved_context = "\n\n".join(formatted_chunks) if formatted_chunks else "No context available."
         
-        # 2. Synthesis Stage
         prompt = f"""
         You are an expert psychometric test developer crafting items for the Philippine Psychometrician Licensure Examination.
 
@@ -156,8 +177,8 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
         
         generated_item = json.loads(response.text)
         
-        # 3. RAGAS Evaluation Gatekeeper
         print("Evaluating Draft with RAGAS (Gemini 3.1 Flash-Lite)...")
+        # Structure payload to support both standard and legacy Ragas dataset interfaces
         eval_dataset = Dataset.from_dict({
             "user_input": [generated_item.get("question", "")],
             "question": [generated_item.get("question", "")],
@@ -184,47 +205,47 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
             
             print(f"    -> Scores: Faithfulness: {f_score:.2f} | Context Rel: {cr_score:.2f} | Answer Rel: {ar_score:.2f}")
             
-            # --- EVALUATION LOGIC ---
+            # Record metrics and preserve the best performing attempt across retries
+            composite_score = f_score + cr_score + ar_score
+            generated_item["citations"] = citations
+            generated_item["retrieved_contexts"] = raw_contexts
+            generated_item["evaluation_metrics"] = {
+                "faithfulness": round(f_score, 3),
+                "context_relevance": round(cr_score, 3),
+                "answer_relevancy": round(ar_score, 3)
+            }
+            
+            if composite_score > best_composite_score:
+                best_composite_score = composite_score
+                best_item = generated_item.copy()
+            
+            # Acceptance thresholds: Faithfulness >= 0.80, Context Relevancy >= 0.70, Answer Relevancy >= 0.70
             if f_score >= 0.80 and cr_score >= 0.70 and ar_score >= 0.70:
                 print("    [✓] All thresholds met. Accepting Draft.")
-                generated_item["citations"] = citations
-                generated_item["retrieved_contexts"] = raw_contexts
-                generated_item["evaluation_metrics"] = {
-                    "faithfulness": round(f_score, 3),
-                    "context_relevance": round(cr_score, 3),
-                    "answer_relevancy": round(ar_score, 3)
-                }
                 generated_item["status"] = "PASSED"
                 generated_item["calibration_attempts"] = attempt
                 return generated_item
             else:
                 print("    [X] Threshold(s) missed. Triggering Recalibration...")
+                # Dynamically alter retrieval depth based on failure mode
                 if cr_score < 0.70:
-                    print("        -> Recalibration Strategy: Narrowing context window to top 3 highest confidence chunks.")
                     current_final_k = 3
                 elif f_score < 0.80:
-                    print("        -> Recalibration Strategy: Broadening context window to top 7 chunks for more grounding evidence.")
                     current_final_k = 7
-                else:
-                    print("        -> Recalibration Strategy: Re-sampling synthesis pass.")
                     
         except Exception as e:
             print(f"    [!] Error during evaluation: {e}")
             
         attempt += 1
 
-    # If it fails all attempts, output the final attempt and flag it
-    print("[!] Max retries reached. Flagging item for manual review.")
-    generated_item["citations"] = citations
-    generated_item["retrieved_contexts"] = raw_contexts
-    generated_item["evaluation_metrics"] = {
-        "faithfulness": round(locals().get('f_score', 0.0), 3),
-        "context_relevance": round(locals().get('cr_score', 0.0), 3),
-        "answer_relevancy": round(locals().get('ar_score', 0.0), 3)
-    }
-    generated_item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
-    generated_item["calibration_attempts"] = attempt
-    return generated_item
+    print(f"[!] Max retries reached. Returning highest-rated attempt (Score: {round(best_composite_score, 2)}). Flagging for manual review.")
+    
+    if best_item:
+        best_item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
+        best_item["calibration_attempts"] = attempt
+        return best_item
+    else:
+        return {"error": "Failed to generate any valid items after max retries."}
 
 if __name__ == "__main__":
     test_item = generate_assessment_item(
