@@ -80,7 +80,9 @@ def process_hybrid_pdf(pdf_path, docling_converter, docling_chunker, text_splitt
             gc.collect() 
             os.remove(temp_path)
         else:
-            print(f"  -> Page {page_num + 1}: Standard text detected. Applying character chunking...")
+            # Unified visual confirmation message
+            print(f"  -> Page {page_num + 1}: Standard text extracted via PyMuPDF.")
+            
             # Split standard text into discrete chunks to prevent vector semantic dilution in the embedding space
             raw_doc = [Document(
                 page_content=fast_text,

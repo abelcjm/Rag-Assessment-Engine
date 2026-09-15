@@ -15,9 +15,8 @@ __pycache__/
 # Environment Variables
 .env
 
-# Exam Questions
-abnormal_psych_mock_exam.json
-abnormal_psych_blueprint.json
-
-# Evaluation
-ragas_evaluation_results.csv
+# Exam Blueprint
+industrial_organizational psychology_blueprint.json
+psychological_assessment_psychometrician_blueprint.json
+developmental_psychology_blueprint.json
+abnormal_pyschology_blueprint.json
