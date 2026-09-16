@@ -1,53 +1,65 @@
 import os
-os.environ["TORCH_COMPILE_DISABLE"] = "1"
-
-from langchain_chroma import Chroma
+import torch
+from supabase.client import create_client, Client
+from langchain_community.vectorstores import SupabaseVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 from sentence_transformers import CrossEncoder
+from dotenv import load_dotenv
+
+load_dotenv()
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
+# 1. Global Configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("CRITICAL: Supabase URL or Key is missing from environment variables.")
+
+# 2. Global Initialization
+print(f"Loading embedding model on {DEVICE}...")
+embedding_model = HuggingFaceEmbeddings(
+    model_name="nomic-ai/nomic-embed-text-v1.5", 
+    model_kwargs={'trust_remote_code': True, 'device': DEVICE} 
+)
+
+print(f"Connecting to Supabase pgvector at {SUPABASE_URL}...")
+supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+vector_db = SupabaseVectorStore(
+    client=supabase_client,
+    embedding=embedding_model,
+    table_name="Documents",
+    query_name="match_documents"
+)
+
+print(f"Loading cross-encoder reranker on {DEVICE}...")
+reranker_model = CrossEncoder('BAAI/bge-reranker-v2-m3', device=DEVICE)
 
 def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
     """
     Executes a two-stage retrieval pipeline: dense vector search followed by cross-encoder reranking.
-
-    Args:
-        query (str): Search query containing competency and diagnostic concepts.
-        top_k (int): Initial number of candidate chunks retrieved via cosine similarity.
-        final_k (int): Number of chunks retained after cross-encoder scoring.
-        reference_filter (list[str]): Specific source textbook filenames to filter metadata.
-
-    Returns:
-        list[Document]: Top ranked LangChain Document chunks.
     """
-    print(f"Step 1: Embedding query and retrieving initial {top_k} candidate chunks...")
+    print(f"Step 1: Retrieving {top_k} candidate chunks for query: '{query}'")
     
-    embedding_model = HuggingFaceEmbeddings(
-        model_name="nomic-ai/nomic-embed-text-v1.5", 
-        model_kwargs={'trust_remote_code': True, 'device': 'cpu'} 
-    )
-    
-    vector_db = Chroma(
-        persist_directory="./chroma_db_store", 
-        embedding_function=embedding_model
-    )
-    
-    # Filter candidates by textbook name if specific references are selected
-    search_filter = None
-    if "All" not in reference_filter:
-        search_filter = {"source": {"$in": reference_filter}}
-        print(f"        Applying metadata filter: {search_filter}")
+    # LangChain's Supabase implementation uses exact JSONB matching. 
+    search_filter = {}
+    if "All" not in reference_filter and len(reference_filter) == 1:
+        search_filter = {"source": reference_filter[0]}
+        print(f"        Applying DB-level metadata filter: {search_filter}")
         
-    if search_filter:
-        initial_results = vector_db.similarity_search(query, k=top_k, filter=search_filter)
-    else:
-        initial_results = vector_db.similarity_search(query, k=top_k)
+    initial_results = vector_db.similarity_search(query, k=top_k, filter=search_filter)
     
-    print(f"\nStep 2: Reranking {len(initial_results)} candidates down to top {final_k} chunks...")
+    # Python-level filtering for multiple textbooks
+    if "All" not in reference_filter and len(reference_filter) > 1:
+        initial_results = [doc for doc in initial_results if doc.metadata.get("source") in reference_filter]
+    
     if not initial_results:
         print("\n--- Retrieval Warning: No chunks found matching query/filter. ---")
         return []
         
-    # Cross-encoder joint token-level evaluation handles fine-grained semantic relevance better than bi-encoder distance
-    reranker_model = CrossEncoder('BAAI/bge-reranker-v2-m3')
+    print(f"Step 2: Reranking {len(initial_results)} candidates down to top {final_k} chunks...")
+    
     pairs = [[query, doc.page_content] for doc in initial_results]
     scores = reranker_model.predict(pairs)
     
@@ -56,10 +68,5 @@ def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
     
     best_chunks = [doc for doc, score in scored_results[:final_k]]
     
-    print(f"Successfully selected top {len(best_chunks)} dense chunks for generation.")
+    print(f"Successfully selected top {len(best_chunks)} chunks.")
     return best_chunks
-
-if __name__ == "__main__":
-    test_query = "Abnormal Psychology Explain the cognitive theories in the development of psychological disorders clinical diagnostic criteria symptoms"
-    best_context = retrieve_and_rerank(test_query, top_k=12, final_k=5)
-    print(f"\nRetrieved {len(best_context)} chunks.")
