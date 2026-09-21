@@ -25,10 +25,10 @@ class BlueprintGenerationRequest(BaseModel):
     exam_session_id: str
 
 class IngestionRequest(BaseModel):
-    pdf_directory: str = "./textbooks"
+    file_path: str  
 
 BLUEPRINT_MAP = {
-    "1": {"subject": "Abnormal Psychology", "file": "abnormal_pyschology_blueprint.json"},
+    "1": {"subject": "Abnormal Psychology", "file": "abnormal_psychology_blueprint.json"},
     "2": {"subject": "Industrial-Organizational Psychology", "file": "industrial_organizational psychology_blueprint.json"},
     "3": {"subject": "Psychological Assessment", "file": "psychological_assessment_psychometrician_blueprint.json"},
     "4": {"subject": "Developmental Psychology", "file": "developmental_psychology_blueprint.json"}
@@ -36,8 +36,8 @@ BLUEPRINT_MAP = {
 
 @app.post("/api/ingest")
 async def trigger_ingestion(request: IngestionRequest):
-    task = batch_ingest_task.delay(request.pdf_directory)
-    return {"message": "Ingestion started", "task_id": task.id}
+    task = batch_ingest_task.delay(request.file_path)
+    return {"message": f"Ingestion started for {request.file_path}", "task_id": task.id}
 
 @app.post("/api/generate/custom")
 async def generate_custom_items(request: CustomGenerationRequest):

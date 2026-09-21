@@ -1,8 +1,9 @@
 import os
 import gc
+import time
 import pymupdf
-import tempfile
 import torch
+from io import BytesIO
 from celery import shared_task
 from supabase.client import create_client, Client
 from langchain_community.vectorstores import SupabaseVectorStore
@@ -11,7 +12,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.datamodel.base_models import InputFormat
+from docling.datamodel.base_models import InputFormat, DocumentStream
 from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
 from dotenv import load_dotenv
 
@@ -28,9 +29,12 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("CRITICAL: Supabase URL or Key is missing from environment variables.")
 
 print(f"Connecting to Supabase pgvector at {SUPABASE_URL} for Ingestion Worker...")
+
+# Aligned with BAAI models and normalization for accurate cosine similarity
 embedding_model = HuggingFaceEmbeddings(
-    model_name="nomic-ai/nomic-embed-text-v1.5", 
-    model_kwargs={'trust_remote_code': True, 'device': DEVICE} 
+    model_name="BAAI/bge-base-en-v1.5", 
+    model_kwargs={'trust_remote_code': True, 'device': DEVICE},
+    encode_kwargs={'normalize_embeddings': True}
 )
 
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -41,8 +45,9 @@ vector_db = SupabaseVectorStore(
     query_name="match_documents"
 )
 
-def process_hybrid_pdf(pdf_path, docling_converter, docling_chunker, text_splitter):
-    doc = pymupdf.open(pdf_path)
+def process_hybrid_pdf(pdf_bytes, file_name, docling_converter, docling_chunker, text_splitter):
+    # Open the PDF directly from the downloaded memory buffer
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     extracted_documents = []
 
     for page_num in range(len(doc)):
@@ -57,13 +62,14 @@ def process_hybrid_pdf(pdf_path, docling_converter, docling_chunker, text_splitt
             temp_pdf = pymupdf.open()
             temp_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
             
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-                temp_path = temp_file.name
-                
-            temp_pdf.save(temp_path)
+            # Write the single page to a memory buffer instead of the hard drive
+            page_bytes = temp_pdf.tobytes()
             temp_pdf.close()
             
-            conversion_result = docling_converter.convert(temp_path)
+            buf = BytesIO(page_bytes)
+            source = DocumentStream(name=f"page_{page_num}.pdf", stream=buf)
+            
+            conversion_result = docling_converter.convert(source)
             chunk_iterator = docling_chunker.chunk(dl_doc=conversion_result.document)
             
             for chunk in chunk_iterator:
@@ -71,7 +77,7 @@ def process_hybrid_pdf(pdf_path, docling_converter, docling_chunker, text_splitt
                 extracted_documents.append(
                     Document(
                         page_content=chunk_text,
-                        metadata={"source": os.path.basename(pdf_path), "page": page_num + 1}
+                        metadata={"source": file_name, "page": page_num + 1}
                     )
                 )
             
@@ -79,11 +85,10 @@ def process_hybrid_pdf(pdf_path, docling_converter, docling_chunker, text_splitt
                 conversion_result.input._backend.unload()
             del conversion_result
             gc.collect() 
-            os.remove(temp_path)
         else:
             raw_doc = [Document(
                 page_content=fast_text,
-                metadata={"source": os.path.basename(pdf_path), "page": page_num + 1}
+                metadata={"source": file_name, "page": page_num + 1}
             )]
             split_chunks = text_splitter.split_documents(raw_doc)
             extracted_documents.extend(split_chunks)
@@ -92,24 +97,44 @@ def process_hybrid_pdf(pdf_path, docling_converter, docling_chunker, text_splitt
     return extracted_documents
 
 @shared_task(bind=True)
-def batch_ingest_task(self, pdf_directory):
-    pdf_files = [f for f in os.listdir(pdf_directory) if f.endswith('.pdf')]
-    if not pdf_files:
-        return {"status": "No PDFs found in directory."}
+def batch_ingest_task(self, file_path):
+    """
+    Downloads a specific PDF from Supabase Storage, chunks it in memory, and embeds it into pgvector.
+    """
+    if not file_path:
+        return {"status": "Error", "message": "No file path provided."}
 
-    # Query Supabase using the exact case-sensitive table name
-    response = supabase_client.table("Documents").select("metadata").execute()
-    existing_sources = set([
-        row["metadata"].get("source") 
-        for row in response.data 
-        if "metadata" in row and "source" in row["metadata"]
-    ])
+    file_name = os.path.basename(file_path)
+
+    # 1. Check if it already exists in the database using JSON filter to bypass 1,000 row limits
+    self.update_state(state='PROCESSING', meta={'step': 'Checking Database', 'details': f'Verifying {file_name} is not a duplicate...'})
+    response = supabase_client.table("Documents") \
+        .select("id") \
+        .contains("metadata", {"source": file_name}) \
+        .limit(1) \
+        .execute()
                 
-    new_pdf_files = [f for f in pdf_files if f not in existing_sources]
-    
-    if not new_pdf_files:
-        return {"status": "All files already ingested.", "skipped": len(existing_sources)}
+    if response.data:
+        return {"status": "Skipped", "message": f"{file_name} is already in the database."}
 
+    self.update_state(state='PROCESSING', meta={'step': 'Downloading PDF', 'details': f'Fetching {file_name} from cloud storage...'})
+
+    # 2. Download the file from Supabase Storage with exponential backoff
+    max_retries = 3
+    pdf_bytes = None
+    
+    for attempt in range(max_retries):
+        try:
+            pdf_bytes = supabase_client.storage.from_("textbooks").download(file_path)
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                return {"status": "FAILURE", "message": f"Download failed after {max_retries} attempts: {e}"}
+            time.sleep(2 ** attempt)
+
+    self.update_state(state='PROCESSING', meta={'step': 'Extracting Layout', 'details': f'Parsing complex layouts in {file_name}...'})
+
+    # 3. Initialize chunking tools
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_formula_enrichment = True
     docling_converter = DocumentConverter(
@@ -119,25 +144,31 @@ def batch_ingest_task(self, pdf_directory):
     docling_chunker = HybridChunker(max_tokens=512, merge_peers=True)
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     
-    all_raw_documents = []
+    try:
+        # 4. Process the PDF purely in memory
+        raw_docs = process_hybrid_pdf(pdf_bytes, file_name, docling_converter, docling_chunker, text_splitter)
 
-    for idx, file_name in enumerate(new_pdf_files):
-        self.update_state(state='PROCESSING', meta={'current_file': file_name, 'progress': f"{idx + 1}/{len(new_pdf_files)}"})
+        self.update_state(state='PROCESSING', meta={'step': 'Embedding', 'details': f'Pushing {len(raw_docs)} chunks to vector database...'})
         
-        file_path = os.path.join(pdf_directory, file_name)
-        raw_docs = process_hybrid_pdf(file_path, docling_converter, docling_chunker, text_splitter)
-        all_raw_documents.extend(raw_docs)
+        # 5. Push to Supabase pgvector in batches
+        batch_size = 100 
+        total_chunks = len(raw_docs)
+        
+        for i in range(0, total_chunks, batch_size):
+            batch = raw_docs[i:i + batch_size]
+            vector_db.add_documents(batch)
+            gc.collect()
 
-    batch_size = 100 
-    total_chunks = len(all_raw_documents)
-    
-    for i in range(0, total_chunks, batch_size):
-        batch = all_raw_documents[i:i + batch_size]
-        vector_db.add_documents(batch)
-        gc.collect()
+    except Exception as e:
+        # 6. Database Rollback: If anything crashes, delete all chunks inserted for this file to prevent orphans
+        try:
+            supabase_client.table("Documents").delete().eq("metadata->>source", file_name).execute()
+        except Exception:
+            pass
+        return {"status": "FAILURE", "message": f"Processing crashed and rolled back: {str(e)}"}
 
     return {
         "status": "Success", 
-        "files_processed": len(new_pdf_files), 
+        "file_processed": file_name, 
         "chunks_embedded": total_chunks
     }

@@ -1,10 +1,15 @@
+import os
 from celery import Celery
 
-# Initialize Celery and point it to the local Redis Docker container
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = os.getenv("REDIS_PORT", "6379")
+REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/0"
+
+# Initialize Celery and point it to the dynamic Redis URL
 celery_app = Celery(
     "psychometric_engine",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/0",
+    broker=REDIS_URL,
+    backend=REDIS_URL,
     include=["hybrid_ingestion", "generate_exam"] 
 )
 

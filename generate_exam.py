@@ -5,7 +5,8 @@ import json
 import warnings
 import time
 import math
-import threading
+import torch
+import redis
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from celery import shared_task
@@ -36,14 +37,17 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# --- SUPABASE CONFIGURATION ---
+# --- INFRASTRUCTURE CONFIGURATION ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+REDIS_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("CRITICAL: Supabase URL or Key is missing from environment variables.")
 
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+redis_client = redis.Redis.from_url(REDIS_URL)
 
 # --- PYDANTIC SCHEMAS ---
 class ItemOptions(BaseModel):
@@ -61,32 +65,34 @@ class AssessmentItemSchema(BaseModel):
     correct_answer: str
     rationale: str
 
-# --- THREAD-SAFE CONCURRENCY & API KEY ROTATION ---
+# --- REDIS-BACKED CONCURRENCY & API KEY ROTATION ---
 raw_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
 API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 
 if not API_KEYS:
     raise ValueError("CRITICAL: No Gemini API keys found! Set GEMINI_API_KEYS='key1,key2' in your .env file.")
 
-CURRENT_KEY_INDEX = 0
-key_lock = threading.Lock()
-chroma_lock = threading.Lock() 
-
 def get_current_key():
-    with key_lock:
-        return API_KEYS[CURRENT_KEY_INDEX]
+    index = int(redis_client.get("gemini_key_index") or 0)
+    return API_KEYS[index % len(API_KEYS)]
 
 def rotate_key(failed_key=None):
-    global CURRENT_KEY_INDEX, EVALUATOR_LLM
-    with key_lock:
-        current_active = API_KEYS[CURRENT_KEY_INDEX]
+    global EVALUATOR_LLM
+    
+    # 10-second timeout ensures dead workers drop the lock automatically
+    with redis_client.lock("key_rotation_lock", timeout=10):
+        current_index = int(redis_client.get("gemini_key_index") or 0)
+        current_active = API_KEYS[current_index % len(API_KEYS)]
+        
+        # If another worker already rotated the key, use the new one immediately
         if failed_key is not None and failed_key != current_active:
-            print(f"\n[i] Key was already rotated to Key {CURRENT_KEY_INDEX + 1}/{len(API_KEYS)}.")
+            print(f"\n[i] Key was already rotated to {current_index % len(API_KEYS) + 1}/{len(API_KEYS)} by another worker.")
             return current_active
 
-        CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
-        new_key = API_KEYS[CURRENT_KEY_INDEX]
-        print(f"\n[!] Quota Exceeded or API Unavailable. Rotating to API Key {CURRENT_KEY_INDEX + 1}/{len(API_KEYS)}...")
+        new_index = current_index + 1
+        redis_client.set("gemini_key_index", new_index)
+        new_key = API_KEYS[new_index % len(API_KEYS)]
+        print(f"\n[!] Quota Exceeded. Rotating to API Key {new_index % len(API_KEYS) + 1}/{len(API_KEYS)}...")
         
         EVALUATOR_LLM = ChatGoogleGenerativeAI(
             model="gemini-3.1-flash-lite", temperature=0.0,
@@ -99,12 +105,14 @@ EVALUATOR_LLM = ChatGoogleGenerativeAI(
     google_api_key=get_current_key(), candidate_count=1, max_retries=2, timeout=60
 )
 
+# --- EMBEDDING & EVALUATION SETTINGS ---
 EMBEDDINGS = HuggingFaceEmbeddings(
-    model_name="nomic-ai/nomic-embed-text-v1.5",
-    model_kwargs={'trust_remote_code': True, 'device': 'cpu'}
+    model_name="BAAI/bge-base-en-v1.5",
+    model_kwargs={'trust_remote_code': True, 'device': DEVICE},
+    encode_kwargs={'normalize_embeddings': True}
 )
 
-RUN_CONFIG = RunConfig(max_workers=1)
+RUN_CONFIG = RunConfig(max_workers=4)
 
 def resolve_context_metric_value(df_row):
     for col in ["nv_context_relevance", "context_relevance", "context_relevancy"]:
@@ -120,7 +128,6 @@ def save_to_supabase(item: dict, session_id: str):
         payload = item.copy()
         payload["exam_session_id"] = session_id
         
-        # Uses exact string matching to target the updated table name
         response = supabase_client.table("Mock Exam Items").insert(payload).execute()
         
         if response.data:
@@ -147,10 +154,9 @@ def generate_assessment_item_task(self, subject, competency, target_blooms_level
             'step': 'Retrieving Context', 'attempt': attempt + 1, 'details': f'Fetching {current_final_k} chunks from vector database...'
         })
         
-        with chroma_lock:
-            best_chunks = retrieve_and_rerank(
-                query=query, top_k=12, final_k=current_final_k, reference_filter=selected_references
-            )
+        best_chunks = retrieve_and_rerank(
+            query=query, top_k=12, final_k=current_final_k, reference_filter=selected_references
+        )
         
         formatted_chunks, citations, raw_contexts = [], [], []
         for chunk in best_chunks:
@@ -212,8 +218,7 @@ def generate_assessment_item_task(self, subject, competency, target_blooms_level
                 "contexts": [raw_contexts or ["No context provided."]]
             })
             
-            with key_lock:
-                current_evaluator = EVALUATOR_LLM
+            current_evaluator = EVALUATOR_LLM
 
             self.update_state(state='PROCESSING', meta={
                 'step': 'Evaluating Faithfulness', 'attempt': attempt + 1, 'details': 'Running RAGAS hallucination checks...'
@@ -281,7 +286,7 @@ def generate_assessment_item_task(self, subject, competency, target_blooms_level
         metrics = best_item.get("evaluation_metrics", {})
         if "context_relevance" not in metrics:
             try:
-                with key_lock: current_evaluator = EVALUATOR_LLM
+                current_evaluator = EVALUATOR_LLM
                 eval_final = evaluate(
                     dataset=best_item["eval_dataset"], metrics=[ContextRelevance(), AnswerRelevancy(strictness=1)],
                     llm=current_evaluator, embeddings=EMBEDDINGS, run_config=RUN_CONFIG, raise_exceptions=True
