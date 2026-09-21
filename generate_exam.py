@@ -5,11 +5,13 @@ import json
 import warnings
 import time
 import math
-import threading
+import torch
+import redis
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from celery import shared_task
+from supabase.client import create_client, Client
 
-# Mock uninstalled langchain_community VertexAI module to bypass Ragas legacy import validation
 dummy_chat = types.ModuleType("langchain_community.chat_models.vertexai")
 dummy_chat.ChatVertexAI = type("ChatVertexAI", (object,), {})
 sys.modules["langchain_community.chat_models.vertexai"] = dummy_chat
@@ -35,7 +37,19 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# --- PYDANTIC SCHEMAS FOR STRUCTURED OUTPUT ---
+# --- INFRASTRUCTURE CONFIGURATION ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+REDIS_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("CRITICAL: Supabase URL or Key is missing from environment variables.")
+
+supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+redis_client = redis.Redis.from_url(REDIS_URL)
+
+# --- PYDANTIC SCHEMAS ---
 class ItemOptions(BaseModel):
     A: str
     B: str
@@ -51,61 +65,54 @@ class AssessmentItemSchema(BaseModel):
     correct_answer: str
     rationale: str
 
-# --- THREAD-SAFE CONCURRENCY & API KEY ROTATION MANAGER ---
+# --- REDIS-BACKED CONCURRENCY & API KEY ROTATION ---
 raw_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
 API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 
 if not API_KEYS:
     raise ValueError("CRITICAL: No Gemini API keys found! Set GEMINI_API_KEYS='key1,key2' in your .env file.")
 
-CURRENT_KEY_INDEX = 0
-key_lock = threading.Lock()
-chroma_lock = threading.Lock()  # Protects SQLite from concurrent read collisions
-
 def get_current_key():
-    with key_lock:
-        return API_KEYS[CURRENT_KEY_INDEX]
+    index = int(redis_client.get("gemini_key_index") or 0)
+    return API_KEYS[index % len(API_KEYS)]
 
 def rotate_key(failed_key=None):
-    global CURRENT_KEY_INDEX, EVALUATOR_LLM
-    with key_lock:
-        current_active = API_KEYS[CURRENT_KEY_INDEX]
+    global EVALUATOR_LLM
+    
+    # 10-second timeout ensures dead workers drop the lock automatically
+    with redis_client.lock("key_rotation_lock", timeout=10):
+        current_index = int(redis_client.get("gemini_key_index") or 0)
+        current_active = API_KEYS[current_index % len(API_KEYS)]
         
-        # If another thread already rotated away from the failed key, reuse the new key
+        # If another worker already rotated the key, use the new one immediately
         if failed_key is not None and failed_key != current_active:
-            print(f"\n[i] Key was already rotated by another thread to Key {CURRENT_KEY_INDEX + 1}/{len(API_KEYS)}.")
+            print(f"\n[i] Key was already rotated to {current_index % len(API_KEYS) + 1}/{len(API_KEYS)} by another worker.")
             return current_active
 
-        CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(API_KEYS)
-        new_key = API_KEYS[CURRENT_KEY_INDEX]
-        print(f"\n[!] 429 Quota Exceeded. Rotating to API Key {CURRENT_KEY_INDEX + 1}/{len(API_KEYS)}...")
+        new_index = current_index + 1
+        redis_client.set("gemini_key_index", new_index)
+        new_key = API_KEYS[new_index % len(API_KEYS)]
+        print(f"\n[!] Quota Exceeded. Rotating to API Key {new_index % len(API_KEYS) + 1}/{len(API_KEYS)}...")
         
         EVALUATOR_LLM = ChatGoogleGenerativeAI(
-            model="gemini-3.1-flash-lite", 
-            temperature=0.0,
-            google_api_key=new_key,
-            candidate_count=1,
-            max_retries=2,
-            timeout=60
+            model="gemini-3.1-flash-lite", temperature=0.0,
+            google_api_key=new_key, candidate_count=1, max_retries=2, timeout=60
         )
         return new_key
 
-# Initial Evaluator Setup
 EVALUATOR_LLM = ChatGoogleGenerativeAI(
-    model="gemini-3.1-flash-lite", 
-    temperature=0.0,
-    google_api_key=get_current_key(),
-    candidate_count=1,
-    max_retries=2,
-    timeout=60
+    model="gemini-3.1-flash-lite", temperature=0.0,
+    google_api_key=get_current_key(), candidate_count=1, max_retries=2, timeout=60
 )
 
+# --- EMBEDDING & EVALUATION SETTINGS ---
 EMBEDDINGS = HuggingFaceEmbeddings(
-    model_name="nomic-ai/nomic-embed-text-v1.5",
-    model_kwargs={'trust_remote_code': True, 'device': 'cpu'}
+    model_name="BAAI/bge-base-en-v1.5",
+    model_kwargs={'trust_remote_code': True, 'device': DEVICE},
+    encode_kwargs={'normalize_embeddings': True}
 )
 
-RUN_CONFIG = RunConfig(max_workers=1)
+RUN_CONFIG = RunConfig(max_workers=4)
 
 def resolve_context_metric_value(df_row):
     for col in ["nv_context_relevance", "context_relevance", "context_relevancy"]:
@@ -113,7 +120,24 @@ def resolve_context_metric_value(df_row):
             return df_row[col]
     return 0.0
 
-def generate_assessment_item(subject, competency, target_blooms_level, selected_references=["All"]):
+def save_to_supabase(item: dict, session_id: str):
+    """
+    Inserts the finalized generated assessment item into the Supabase PostgreSQL database.
+    """
+    try:
+        payload = item.copy()
+        payload["exam_session_id"] = session_id
+        
+        response = supabase_client.table("Mock Exam Items").insert(payload).execute()
+        
+        if response.data:
+            inserted_id = response.data[0]['id']
+            print(f"\n[DB-SUCCESS] Item saved to Supabase with ID: {inserted_id}")
+    except Exception as e:
+        print(f"\n[DB-ERROR] Failed to save to Supabase: {e}")
+
+@shared_task(bind=True)
+def generate_assessment_item_task(self, subject, competency, target_blooms_level, selected_references=["All"], exam_session_id=None):
     query = f"{subject} {competency} clinical diagnostic criteria symptoms classification definitions etiology"
     
     MAX_RETRIES = 2
@@ -126,17 +150,13 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
     max_quota_retries = max(len(API_KEYS) * 2, 4)
     
     while attempt <= MAX_RETRIES:
-        print(f"\n--- Generation Cycle (Attempt {attempt + 1}/{MAX_RETRIES + 1}) ---")
-        print(f"Retrieving context for: '{competency[:45]}...' (final_k={current_final_k})")
+        self.update_state(state='PROCESSING', meta={
+            'step': 'Retrieving Context', 'attempt': attempt + 1, 'details': f'Fetching {current_final_k} chunks from vector database...'
+        })
         
-        # Thread-locked retrieval to keep SQLite safe during concurrent executions
-        with chroma_lock:
-            best_chunks = retrieve_and_rerank(
-                query=query, 
-                top_k=12, 
-                final_k=current_final_k, 
-                reference_filter=selected_references
-            )
+        best_chunks = retrieve_and_rerank(
+            query=query, top_k=12, final_k=current_final_k, reference_filter=selected_references
+        )
         
         formatted_chunks, citations, raw_contexts = [], [], []
         for chunk in best_chunks:
@@ -147,20 +167,13 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
             citations.append({"source": source_name, "page": page_num})
             raw_contexts.append(content)
             
-            chunk_text = (
-                f"--- START OF SOURCE ---\n"
-                f"Document: {source_name}\n"
-                f"Page: {page_num}\n"
-                f"Content:\n{content}\n"
-                f"--- END OF SOURCE ---"
-            )
+            chunk_text = (f"--- START OF SOURCE ---\nDocument: {source_name}\nPage: {page_num}\nContent:\n{content}\n--- END OF SOURCE ---")
             formatted_chunks.append(chunk_text)
             
         retrieved_context = "\n\n".join(formatted_chunks) if formatted_chunks else "No context available."
         
         prompt = f"""
         You are an expert psychometric test developer crafting items for the Philippine Psychometrician Licensure Examination.
-
         TARGET DOMAIN: {subject}
         TARGET COMPETENCY: {competency}
         TARGET COGNITIVE TIER (BLOOM'S): {target_blooms_level}
@@ -181,14 +194,14 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
             active_key = get_current_key()
             client = genai.Client(api_key=active_key)
             
-            print("Synthesizing item via Gemini 3.5 Flash-Lite...")
+            self.update_state(state='PROCESSING', meta={
+                'step': 'Generating Draft', 'attempt': attempt + 1, 'details': 'Drafting question via Gemini...'
+            })
+            
             response = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
-                contents=prompt,
+                model="gemini-3.5-flash-lite", contents=prompt,
                 config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=AssessmentItemSchema,
-                    temperature=0.3
+                    response_mime_type="application/json", response_schema=AssessmentItemSchema, temperature=0.3
                 )
             )   
             
@@ -205,110 +218,86 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
                 "contexts": [raw_contexts or ["No context provided."]]
             })
             
-            with key_lock:
-                current_evaluator = EVALUATOR_LLM
+            current_evaluator = EVALUATOR_LLM
 
-            # --- STAGE 1: FAITHFULNESS GATEKEEPER ---
-            print("Evaluating Stage 1: Faithfulness...")
+            self.update_state(state='PROCESSING', meta={
+                'step': 'Evaluating Faithfulness', 'attempt': attempt + 1, 'details': 'Running RAGAS hallucination checks...'
+            })
+            
             eval_f = evaluate(
-                dataset=eval_dataset,
-                metrics=[Faithfulness()],
-                llm=current_evaluator,
-                embeddings=EMBEDDINGS,
-                run_config=RUN_CONFIG,
-                raise_exceptions=True
+                dataset=eval_dataset, metrics=[Faithfulness()], llm=current_evaluator,
+                embeddings=EMBEDDINGS, run_config=RUN_CONFIG, raise_exceptions=True
             )
             scores_f = eval_f.to_pandas().iloc[0].to_dict()
             f_score = float(scores_f.get("faithfulness", 0.0) or 0.0)
             
             if math.isnan(f_score):
-                raise ValueError("429 Quota Exceeded during Faithfulness evaluation.")
+                raise ValueError("429/503 API Unavailable or Quota Exceeded during Faithfulness evaluation.")
                 
-            print(f"    -> Faithfulness: {f_score:.2f} (Floor: 0.75)")
-            
-            # Track candidate with highest Faithfulness
             if f_score > best_faithfulness:
                 best_faithfulness = f_score
                 best_item = generated_item.copy()
                 best_item["evaluation_metrics"] = {"faithfulness": round(f_score, 3)}
                 best_item["eval_dataset"] = eval_dataset
 
-            # Check Stage 1 Floor (0.75)
             if f_score >= 0.75:
-                print("    [✓] Faithfulness passed. Running Secondary Metrics...")
+                self.update_state(state='PROCESSING', meta={
+                    'step': 'Evaluating Relevancy', 'attempt': attempt + 1, 'details': f'Faithfulness passed ({f_score:.2f}). Checking Relevancy...'
+                })
                 eval_s = evaluate(
-                    dataset=eval_dataset,
-                    metrics=[ContextRelevance(), AnswerRelevancy(strictness=1)],
-                    llm=current_evaluator,
-                    embeddings=EMBEDDINGS,
-                    run_config=RUN_CONFIG,
-                    raise_exceptions=True
+                    dataset=eval_dataset, metrics=[ContextRelevance(), AnswerRelevancy(strictness=1)],
+                    llm=current_evaluator, embeddings=EMBEDDINGS, run_config=RUN_CONFIG, raise_exceptions=True
                 )
                 scores_s = eval_s.to_pandas().iloc[0].to_dict()
                 cr_score = float(resolve_context_metric_value(scores_s) or 0.0)
                 ar_score = float(scores_s.get("answer_relevancy", 0.0) or 0.0)
                 
                 if math.isnan(cr_score) or math.isnan(ar_score):
-                    raise ValueError("429 Quota Exceeded during Secondary evaluation.")
+                    raise ValueError("429/503 API Unavailable or Quota Exceeded during Secondary evaluation.")
                     
-                print(f"    -> Context Rel: {cr_score:.2f} | Answer Rel: {ar_score:.2f}")
-                
                 generated_item["evaluation_metrics"] = {
-                    "faithfulness": round(f_score, 3),
-                    "context_relevance": round(cr_score, 3),
-                    "answer_relevancy": round(ar_score, 3)
+                    "faithfulness": round(f_score, 3), "context_relevance": round(cr_score, 3), "answer_relevancy": round(ar_score, 3)
                 }
                 
                 if cr_score >= 0.70 and ar_score >= 0.70:
-                    print("    [✓] All criteria satisfied. Accepting Draft.")
                     generated_item["status"] = "PASSED"
                     generated_item["calibration_attempts"] = attempt
+                    save_to_supabase(generated_item, exam_session_id)
                     return generated_item
                 else:
-                    print("    [X] Secondary threshold(s) missed. Recalibrating...")
-                    if cr_score < 0.70:
-                        current_final_k = 3
+                    if cr_score < 0.70: current_final_k = 3
                     attempt += 1
             else:
-                print("    [X] Faithfulness below 0.75. Skipping secondary checks...")
                 current_final_k = 7
                 attempt += 1
 
         except Exception as e:
             error_msg = str(e).lower()
-            if any(term in error_msg for term in ["429", "quota", "resourceexhausted", "exhausted"]):
+            if any(term in error_msg for term in ["429", "503", "504", "quota", "resourceexhausted", "exhausted", "unavailable", "deadline"]):
                 quota_retry_count += 1
-                if quota_retry_count >= max_quota_retries:
-                    print(f"    [!] All API keys exhausted. Aborting retry loop.")
-                    break
+                if quota_retry_count >= max_quota_retries: break
                 rotate_key(failed_key=active_key)
                 time.sleep(3)
-                continue  # Retry without incrementing attempt count
+                continue 
             else:
-                print(f"    [!] Error during execution: {e}")
                 attempt += 1
 
-    print(f"[!] Target cycles completed. Best Faithfulness: {best_faithfulness:.2f}.")
-    
-    # Finalize the best-scoring item: run secondary metrics if they were skipped
     if best_item:
         metrics = best_item.get("evaluation_metrics", {})
         if "context_relevance" not in metrics:
-            print("Running final secondary metrics check on best candidate...")
             try:
-                with key_lock:
-                    current_evaluator = EVALUATOR_LLM
+                current_evaluator = EVALUATOR_LLM
                 eval_final = evaluate(
-                    dataset=best_item["eval_dataset"],
-                    metrics=[ContextRelevance(), AnswerRelevancy(strictness=1)],
-                    llm=current_evaluator,
-                    embeddings=EMBEDDINGS,
-                    run_config=RUN_CONFIG,
-                    raise_exceptions=True
+                    dataset=best_item["eval_dataset"], metrics=[ContextRelevance(), AnswerRelevancy(strictness=1)],
+                    llm=current_evaluator, embeddings=EMBEDDINGS, run_config=RUN_CONFIG, raise_exceptions=True
                 )
                 scores_fin = eval_final.to_pandas().iloc[0].to_dict()
-                metrics["context_relevance"] = round(float(resolve_context_metric_value(scores_fin) or 0.0), 3)
-                metrics["answer_relevancy"] = round(float(scores_fin.get("answer_relevancy", 0.0) or 0.0), 3)
+                
+                cr_raw = float(resolve_context_metric_value(scores_fin) or 0.0)
+                ar_raw = float(scores_fin.get("answer_relevancy", 0.0) or 0.0)
+                
+                metrics["context_relevance"] = 0.0 if math.isnan(cr_raw) else round(cr_raw, 3)
+                metrics["answer_relevancy"] = 0.0 if math.isnan(ar_raw) else round(ar_raw, 3)
             except Exception:
                 metrics["context_relevance"] = 0.0
                 metrics["answer_relevancy"] = 0.0
@@ -316,6 +305,7 @@ def generate_assessment_item(subject, competency, target_blooms_level, selected_
         best_item.pop("eval_dataset", None)
         best_item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
         best_item["calibration_attempts"] = attempt
+        save_to_supabase(best_item, exam_session_id)
         return best_item
     else:
         return {"error": f"Failed generation for: {competency}"}

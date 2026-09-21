@@ -19,4 +19,8 @@ __pycache__/
 industrial_organizational psychology_blueprint.json
 psychological_assessment_psychometrician_blueprint.json
 developmental_psychology_blueprint.json
-abnormal_pyschology_blueprint.json
+abnormal_psychology_blueprint.json
+
+# Docker files
+docker-compose.yml
+Dockerfile
