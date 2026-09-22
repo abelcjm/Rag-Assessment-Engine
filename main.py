@@ -1,6 +1,7 @@
 import json
 import os
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from celery.result import AsyncResult
@@ -10,6 +11,19 @@ from hybrid_ingestion import batch_ingest_task
 from generate_exam import generate_assessment_item_task
 
 app = FastAPI(title="Psychometric RAG Assessment Engine")
+
+# Configure CORS to allow requests from local development and Vercel deployments
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://rag-assessment-prototype.vercel.app"
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class CustomGenerationRequest(BaseModel):
     subject: str
