@@ -5,10 +5,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from celery.result import AsyncResult
+from supabase import create_client, Client
 
 from celery_app import celery_app
 from hybrid_ingestion import batch_ingest_task
 from generate_exam import generate_assessment_item_task
+
+# Initialize Supabase Client for the direct DELETE operation
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 app = FastAPI(title="Psychometric RAG Assessment Engine")
 
@@ -19,12 +25,22 @@ app.add_middleware(
         "http://localhost:3000",
         "https://rag-assessment-prototype.vercel.app"
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# --- New Pydantic Models ---
+class VectorizeRequest(BaseModel):
+    request_id: str
+    storage_path: str
+    tags: List[str] = []
+
+class DeleteVectorsRequest(BaseModel):
+    storage_path: str
+
+# --- Existing Models ---
 class CustomGenerationRequest(BaseModel):
     subject: str
     competency: str
@@ -38,9 +54,6 @@ class BlueprintGenerationRequest(BaseModel):
     selected_pdfs: List[str] = ["All"]
     exam_session_id: str
 
-class IngestionRequest(BaseModel):
-    file_path: str  
-
 BLUEPRINT_MAP = {
     "1": {"subject": "Abnormal Psychology", "file": "abnormal_psychology_blueprint.json"},
     "2": {"subject": "Industrial-Organizational Psychology", "file": "industrial_organizational psychology_blueprint.json"},
@@ -48,11 +61,44 @@ BLUEPRINT_MAP = {
     "4": {"subject": "Developmental Psychology", "file": "developmental_psychology_blueprint.json"}
 }
 
-@app.post("/api/ingest")
-async def trigger_ingestion(request: IngestionRequest):
-    task = batch_ingest_task.delay(request.file_path)
-    return {"message": f"Ingestion started for {request.file_path}", "task_id": task.id}
+# --- Updated Endpoints ---
+@app.post("/api/v1/vectorize")
+async def trigger_vectorize(request: VectorizeRequest):
+    # Passes the new exact arguments to the Celery worker
+    task = batch_ingest_task.delay(
+        request_id=request.request_id,
+        storage_path=request.storage_path,
+        tags=request.tags
+    )
+    return {"message": f"Vectorization started for {request.storage_path}", "task_id": task.id}
 
+@app.delete("/api/v1/vectors")
+async def delete_vectors(request: DeleteVectorsRequest):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized on the backend.")
+    try:
+        # Executes the hard purge of the vector embeddings based on the indexed path
+        response = supabase.table("Documents").delete().eq("storage_path", request.storage_path).execute()
+        return {"message": f"Successfully deleted vectors for {request.storage_path}", "data": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/task/{task_id}")
+async def get_task_status(task_id: str):
+    task_result = AsyncResult(task_id, app=celery_app)
+    response = {"task_id": task_id, "status": task_result.status}
+    
+    if task_result.status == 'PROCESSING':
+        response["details"] = task_result.info 
+    elif task_result.status == 'SUCCESS':
+        response["details"] = {"message": "Task successfully completed."}
+        response["final_result"] = task_result.result
+    elif task_result.status == 'FAILURE':
+        response["details"] = str(task_result.info)
+        
+    return response
+
+# --- Generation Endpoints (Unchanged) ---
 @app.post("/api/generate/custom")
 async def generate_custom_items(request: CustomGenerationRequest):
     task_ids = []
@@ -94,18 +140,3 @@ async def generate_blueprint(request: BlueprintGenerationRequest):
             task_ids.append(task.id)
             
     return {"message": f"Queued {len(task_ids)} items.", "task_ids": task_ids}
-
-@app.get("/api/tasks/{task_id}")
-async def get_task_status(task_id: str):
-    task_result = AsyncResult(task_id, app=celery_app)
-    response = {"task_id": task_id, "status": task_result.status}
-    
-    if task_result.status == 'PROCESSING':
-        response["details"] = task_result.info 
-    elif task_result.status == 'SUCCESS':
-        response["details"] = {"message": "Item generated and saved to database."}
-        response["final_result"] = task_result.result
-    elif task_result.status == 'FAILURE':
-        response["details"] = str(task_result.info)
-        
-    return response
