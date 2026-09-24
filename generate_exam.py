@@ -5,6 +5,7 @@ import json
 import warnings
 import time
 import math
+import re
 import torch
 import redis
 from pydantic import BaseModel
@@ -39,7 +40,7 @@ load_dotenv()
 
 # --- INFRASTRUCTURE CONFIGURATION ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 REDIS_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -79,12 +80,10 @@ def get_current_key():
 def rotate_key(failed_key=None):
     global EVALUATOR_LLM
     
-    # 10-second timeout ensures dead workers drop the lock automatically
     with redis_client.lock("key_rotation_lock", timeout=10):
         current_index = int(redis_client.get("gemini_key_index") or 0)
         current_active = API_KEYS[current_index % len(API_KEYS)]
         
-        # If another worker already rotated the key, use the new one immediately
         if failed_key is not None and failed_key != current_active:
             print(f"\n[i] Key was already rotated to {current_index % len(API_KEYS) + 1}/{len(API_KEYS)} by another worker.")
             return current_active
@@ -120,16 +119,47 @@ def resolve_context_metric_value(df_row):
             return df_row[col]
     return 0.0
 
+def clean_question_stem(stem: str) -> str:
+    """
+    Strips AI meta-phrases from the question stem and restores sentence capitalization.
+    """
+    patterns = [
+        r"^(According to the (provided |retrieved )?(text|passage|context|article|document|excerpt),?\s*)",
+        r"^(Based on the (provided |retrieved )?(text|passage|context|article|document|excerpt),?\s*)",
+        r"^(In accordance with the (provided |retrieved )?(text|passage|context),?\s*)",
+        r"^(As stated in the (provided |retrieved )?(text|passage|context),?\s*)",
+        r"^(From the (provided |retrieved )?(text|passage|context),?\s*)"
+    ]
+    cleaned = stem.strip()
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned.strip()
+
+def build_domain_query(subject: str, competency: str) -> str:
+    """
+    Dynamically expands the search query based on the BLEPP domain rather than hardcoding clinical terms.
+    """
+    subject_lower = subject.lower()
+    if "abnormal" in subject_lower:
+        terms = "diagnostic criteria symptoms DSM classification etiology features"
+    elif "industrial" in subject_lower or "organizational" in subject_lower:
+        terms = "workplace behavior management organizational theory HRM leadership dynamics"
+    elif "assessment" in subject_lower:
+        terms = "psychometrics reliability validity test administration norms scoring interpretation"
+    elif "developmental" in subject_lower:
+        terms = "stages cognitive moral psychosocial milestones lifespan development"
+    else:
+        terms = "principles theories definitions concepts application"
+    return f"{subject} {competency} {terms}"
+
 def save_to_supabase(item: dict, session_id: str):
-    """
-    Inserts the finalized generated assessment item into the Supabase PostgreSQL database.
-    """
     try:
         payload = item.copy()
         payload["exam_session_id"] = session_id
-        
         response = supabase_client.table("Mock Exam Items").insert(payload).execute()
-        
         if response.data:
             inserted_id = response.data[0]['id']
             print(f"\n[DB-SUCCESS] Item saved to Supabase with ID: {inserted_id}")
@@ -138,7 +168,7 @@ def save_to_supabase(item: dict, session_id: str):
 
 @shared_task(bind=True)
 def generate_assessment_item_task(self, subject, competency, target_blooms_level, selected_references=["All"], exam_session_id=None):
-    query = f"{subject} {competency} clinical diagnostic criteria symptoms classification definitions etiology"
+    query = build_domain_query(subject, competency)
     
     MAX_RETRIES = 2
     attempt = 0
@@ -155,7 +185,7 @@ def generate_assessment_item_task(self, subject, competency, target_blooms_level
         })
         
         best_chunks = retrieve_and_rerank(
-            query=query, top_k=12, final_k=current_final_k, reference_filter=selected_references
+            query=query, top_k=15, final_k=current_final_k, reference_filter=selected_references
         )
         
         formatted_chunks, citations, raw_contexts = [], [], []
@@ -172,23 +202,36 @@ def generate_assessment_item_task(self, subject, competency, target_blooms_level
             
         retrieved_context = "\n\n".join(formatted_chunks) if formatted_chunks else "No context available."
         
-        prompt = f"""
-        You are an expert psychometric test developer crafting items for the Philippine Psychometrician Licensure Examination.
-        TARGET DOMAIN: {subject}
-        TARGET COMPETENCY: {competency}
-        TARGET COGNITIVE TIER (BLOOM'S): {target_blooms_level}
+        prompt = f"""You are a licensed Psychometrician and psychometric test developer creating formal multiple-choice items for the Philippine Psychometrician Licensure Examination (BLEPP).
 
-        READ THE FOLLOWING TEXTBOOK PASSAGES CAREFULLY:
-        <context>
-        {retrieved_context}
-        </context>
+TARGET DOMAIN: {subject}
+TARGET COMPETENCY: {competency}
+TARGET COGNITIVE LEVEL (BLOOM'S): {target_blooms_level}
 
-        MANDATORY INSTRUCTIONS:
-        1. EXTRACT EVIDENCE FIRST: Locate a specific sentence in the context that directly addresses the competency.
-        2. STRICT GROUNDING: Write the question stem and the correct answer based ONLY on that extracted evidence. Do NOT add external diagnostic criteria, numbers, or theories not present in the text.
-        3. RATIONALE STRUCTURE: The rationale must state the exact evidence from the text, citing the Document and Page number.
-        4. OPTIONS: Provide 4 plausible, mutually exclusive options (A, B, C, D) of equal length.
-        """
+SOURCE MATERIAL (TEXTBOOK EXCERPTS):
+<context>
+{retrieved_context}
+</context>
+
+ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
+1. NO SOURCE REFERENCING IN STEM:
+   - NEVER start or include phrases like "According to the text", "Based on the provided passage", "As discussed in the excerpt", or "According to the author".
+   - Treat the domain concepts as established, objective facts or standard scientific principles.
+   - The question must stand alone as an authentic exam item. The examinee does not have access to any reference text.
+
+2. AUTHENTIC SCENARIOS & VIGNETTES:
+   - For application/analysis levels, construct a realistic workplace, clinical, or testing scenario.
+   - Vary the organizations, industries, and names used (e.g., healthcare, education, retail, tech, public sector). Avoid generic clichés.
+
+3. STRICT OPTION HOMOGENEITY:
+   - All 4 options (A, B, C, D) MUST be approximately equal in length, grammatical structure, and complexity.
+   - Do NOT make the correct answer significantly longer or more detailed than the distractors.
+   - Distractors must be plausible, mutually exclusive alternatives within the same conceptual category.
+
+4. GROUNDING & RATIONALE:
+   - The item's factual truth must be grounded in the context provided.
+   - The 'rationale' field must cite the exact Document name and Page number where the answer is verified.
+"""
         
         try:
             active_key = get_current_key()
@@ -199,13 +242,19 @@ def generate_assessment_item_task(self, subject, competency, target_blooms_level
             })
             
             response = client.models.generate_content(
-                model="gemini-3.5-flash-lite", contents=prompt,
+                model="gemini-3.5-flash-lite",
+                contents=prompt,
                 config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json", response_schema=AssessmentItemSchema, temperature=0.3
+                    response_mime_type="application/json",
+                    response_schema=AssessmentItemSchema,
+                    temperature=0.4
                 )
             )   
             
             generated_item = json.loads(response.text)
+            
+            # Programmatically sanitize any remaining meta-phrasing
+            generated_item["question"] = clean_question_stem(generated_item["question"])
             generated_item["citations"] = citations
             generated_item["retrieved_contexts"] = raw_contexts
             
