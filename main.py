@@ -1,6 +1,7 @@
+# main.py
 import json
 import os
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -9,16 +10,20 @@ from supabase import create_client, Client
 
 from celery_app import celery_app
 from hybrid_ingestion import batch_ingest_task
-from generate_exam import generate_assessment_item_task
+from generate_exam import (
+    generate_assessment_item_task,
+    generate_blueprint_batch_task,
+    generate_custom_batch_task
+)
 
-# Initialize Supabase Client for the direct DELETE operation
+# Initialize Supabase Client for the direct DELETE and UPDATE operations
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 app = FastAPI(title="Psychometric RAG Assessment Engine")
 
-# Configure CORS to allow requests from local development and Vercel deployments
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -31,7 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- New Pydantic Models ---
+# --- Pydantic Models ---
 class VectorizeRequest(BaseModel):
     request_id: str
     storage_path: str
@@ -40,35 +45,23 @@ class VectorizeRequest(BaseModel):
 class DeleteVectorsRequest(BaseModel):
     storage_path: str
 
-# --- Existing Models ---
-class CustomGenerationRequest(BaseModel):
-    subject: str
-    competency: str
-    bloom: str
-    count: int = 1
-    selected_pdfs: List[str] = ["All"]
-    exam_session_id: Optional[str] = None
-
 class BlueprintGenerationRequest(BaseModel):
     blueprint_id: str
     selected_pdfs: List[str] = ["All"]
     exam_session_id: str
 
+class CustomBatchRequest(BaseModel):
+    exam_session_id: str
+    items: List[dict]  # Expects dicts with: subject, competency, bloom, count
+    selected_pdfs: List[str] = ["All"]
+
 class RegenerateRequest(BaseModel):
     old_item_id: str
     exam_session_id: str
 
-BLUEPRINT_MAP = {
-    "1": {"subject": "Abnormal Psychology", "file": "abnormal_psychology_blueprint.json"},
-    "2": {"subject": "Industrial-Organizational Psychology", "file": "industrial_organizational psychology_blueprint.json"},
-    "3": {"subject": "Psychological Assessment", "file": "psychological_assessment_psychometrician_blueprint.json"},
-    "4": {"subject": "Developmental Psychology", "file": "developmental_psychology_blueprint.json"}
-}
-
-# --- Updated Endpoints ---
+# --- Vectorization Endpoints ---
 @app.post("/api/v1/vectorize")
 async def trigger_vectorize(request: VectorizeRequest):
-    # Passes the new exact arguments to the Celery worker
     task = batch_ingest_task.delay(
         request_id=request.request_id,
         storage_path=request.storage_path,
@@ -81,7 +74,6 @@ async def delete_vectors(request: DeleteVectorsRequest):
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase client not initialized on the backend.")
     try:
-        # Executes the hard purge of the vector embeddings based on the indexed path
         response = supabase.table("Documents").delete().eq("storage_path", request.storage_path).execute()
         return {"message": f"Successfully deleted vectors for {request.storage_path}", "data": response.data}
     except Exception as e:
@@ -102,20 +94,24 @@ async def get_task_status(task_id: str):
         
     return response
 
-# --- Generation Endpoints (Unchanged) ---
-@app.post("/api/generate/custom")
-async def generate_custom_items(request: CustomGenerationRequest):
-    task_ids = []
-    for _ in range(request.count):
-        task = generate_assessment_item_task.delay(
-            subject=request.subject,
-            competency=request.competency,
-            target_blooms_level=request.bloom,
-            selected_references=request.selected_pdfs,
-            exam_session_id=request.exam_session_id
-        )
-        task_ids.append(task.id)
-    return {"message": f"Queued {request.count} item(s).", "task_ids": task_ids}
+# --- Fire-and-Forget Generation Endpoints ---
+@app.post("/api/v1/generate/blueprint")
+async def generate_blueprint_async(request: BlueprintGenerationRequest):
+    generate_blueprint_batch_task.delay(
+        exam_session_id=request.exam_session_id,
+        blueprint_id=request.blueprint_id,
+        selected_pdfs=request.selected_pdfs
+    )
+    return {"status": "queued", "message": "Blueprint generation dispatched to Celery worker."}
+
+@app.post("/api/v1/generate/custom_batch")
+async def generate_custom_batch_async(request: CustomBatchRequest):
+    generate_custom_batch_task.delay(
+        exam_session_id=request.exam_session_id,
+        items=request.items,
+        selected_pdfs=request.selected_pdfs
+    )
+    return {"status": "queued", "message": "Custom batch generation dispatched to Celery worker."}
 
 @app.post("/api/v1/generate/regenerate")
 async def regenerate_item(request: RegenerateRequest):
@@ -123,20 +119,16 @@ async def regenerate_item(request: RegenerateRequest):
         raise HTTPException(status_code=500, detail="Supabase client not initialized on the backend.")
         
     try:
-        # 1. Extract the generation parameters from the rejected item
         item_resp = supabase.table("Mock Exam Items").select("subject, competency, blooms_level").eq("id", request.old_item_id).execute()
         if not item_resp.data:
             raise HTTPException(status_code=404, detail="Original item not found in the database.")
         old_item = item_resp.data[0]
         
-        # 2. Retrieve the specific PDF references tied to this exam session
         exam_resp = supabase.table("Exams").select("references").eq("id", request.exam_session_id).execute()
         references = exam_resp.data[0].get("references", ["All"]) if exam_resp.data else ["All"]
         
-        # 3. Archive the rejected item so it vanishes from the teacher's active UI
         supabase.table("Mock Exam Items").update({"status": "ARCHIVED"}).eq("id", request.old_item_id).execute()
         
-        # 4. Trigger Celery. Passing the exam_session_id guarantees save_to_supabase() attaches it correctly
         task = generate_assessment_item_task.delay(
             subject=old_item.get("subject"),
             competency=old_item.get("competency"),
@@ -149,31 +141,3 @@ async def regenerate_item(request: RegenerateRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/generate/blueprint")
-async def generate_blueprint(request: BlueprintGenerationRequest):
-    blueprint_config = BLUEPRINT_MAP.get(request.blueprint_id)
-    if not blueprint_config:
-        raise HTTPException(status_code=404, detail="Blueprint ID not found.")
-        
-    blueprint_path = blueprint_config["file"]
-    if not os.path.exists(blueprint_path):
-         raise HTTPException(status_code=404, detail=f"Blueprint file '{blueprint_path}' missing.")
-
-    with open(blueprint_path, 'r', encoding='utf-8') as f:
-        blueprint_data = json.load(f)
-        
-    task_ids = []
-    for requirement in blueprint_data:
-        count = requirement.get("items_to_generate", 0)
-        for _ in range(count):
-            task = generate_assessment_item_task.delay(
-                subject=blueprint_config["subject"],
-                competency=requirement["competency"],
-                target_blooms_level=requirement["bloom_level"],
-                selected_references=request.selected_pdfs,
-                exam_session_id=request.exam_session_id
-            )
-            task_ids.append(task.id)
-            
-    return {"message": f"Queued {len(task_ids)} items.", "task_ids": task_ids}
