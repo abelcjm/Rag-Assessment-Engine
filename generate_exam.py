@@ -169,31 +169,39 @@ def save_to_supabase(item: dict, session_id: str):
 
 def execute_core_generation_loop(subject, competency, target_blooms_level, selected_references, exam_session_id, celery_task=None):
     """
-    Extracted core logic to allow execution by both single-item and batch-processing tasks.
+    Refactored core logic: Retrieves chunks ONCE outside the loop to save compute, 
+    then dynamically slices the chunk array inside the retry loop for prompt variations.
     """
     query = build_domain_query(subject, competency)
     
     MAX_RETRIES = 2
     attempt = 0
     current_final_k = 5
+    max_k_needed = 7 # The maximum chunks we might need if we have to expand context
     
     best_item = None
     best_faithfulness = -1.0
     quota_retry_count = 0
     max_quota_retries = max(len(API_KEYS) * 2, 4)
     
+    # 1. ONE-TIME HEAVY RETRIEVAL
+    if celery_task:
+        celery_task.update_state(state='PROCESSING', meta={
+            'step': 'Retrieving Context', 'attempt': 1, 'details': f'Fetching {max_k_needed} chunks from vector database once...'
+        })
+    
+    # Retrieve the maximum amount of chunks we might need for any retry iteration
+    all_retrieved_chunks = retrieve_and_rerank(
+        query=query, top_k=15, final_k=max_k_needed, reference_filter=selected_references
+    )
+    
+    # 2. RETRY LOOP FOR GENERATION & EVALUATION ONLY
     while attempt <= MAX_RETRIES:
-        if celery_task:
-            celery_task.update_state(state='PROCESSING', meta={
-                'step': 'Retrieving Context', 'attempt': attempt + 1, 'details': f'Fetching {current_final_k} chunks from vector database...'
-            })
-        
-        best_chunks = retrieve_and_rerank(
-            query=query, top_k=15, final_k=current_final_k, reference_filter=selected_references
-        )
+        # Dynamically slice the pre-retrieved chunks based on the current attempt's needs
+        active_chunks = all_retrieved_chunks[:current_final_k]
         
         formatted_chunks, citations, raw_contexts = [], [], []
-        for chunk in best_chunks:
+        for chunk in active_chunks:
             source_name = chunk.metadata.get("source", "Unknown Document")
             page_num = chunk.metadata.get("page", "Unknown Page")
             content = chunk.page_content.strip()
@@ -243,7 +251,7 @@ ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
             
             if celery_task:
                 celery_task.update_state(state='PROCESSING', meta={
-                    'step': 'Generating Draft', 'attempt': attempt + 1, 'details': 'Drafting question via Gemini...'
+                    'step': 'Generating Draft', 'attempt': attempt + 1, 'details': f'Drafting question via Gemini (using {current_final_k} chunks)...'
                 })
             
             response = client.models.generate_content(
@@ -320,10 +328,10 @@ ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
                     save_to_supabase(generated_item, exam_session_id)
                     return generated_item
                 else:
-                    if cr_score < 0.70: current_final_k = 3
+                    if cr_score < 0.70: current_final_k = 3 # Shrink context window for next attempt
                     attempt += 1
             else:
-                current_final_k = 7
+                current_final_k = 7 # Expand context window for next attempt
                 attempt += 1
 
         except Exception as e:
