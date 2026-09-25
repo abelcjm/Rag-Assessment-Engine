@@ -54,6 +54,10 @@ class BlueprintGenerationRequest(BaseModel):
     selected_pdfs: List[str] = ["All"]
     exam_session_id: str
 
+class RegenerateRequest(BaseModel):
+    old_item_id: str
+    exam_session_id: str
+
 BLUEPRINT_MAP = {
     "1": {"subject": "Abnormal Psychology", "file": "abnormal_psychology_blueprint.json"},
     "2": {"subject": "Industrial-Organizational Psychology", "file": "industrial_organizational psychology_blueprint.json"},
@@ -112,6 +116,39 @@ async def generate_custom_items(request: CustomGenerationRequest):
         )
         task_ids.append(task.id)
     return {"message": f"Queued {request.count} item(s).", "task_ids": task_ids}
+
+@app.post("/api/v1/generate/regenerate")
+async def regenerate_item(request: RegenerateRequest):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized on the backend.")
+        
+    try:
+        # 1. Extract the generation parameters from the rejected item
+        item_resp = supabase.table("Mock Exam Items").select("subject, competency, blooms_level").eq("id", request.old_item_id).execute()
+        if not item_resp.data:
+            raise HTTPException(status_code=404, detail="Original item not found in the database.")
+        old_item = item_resp.data[0]
+        
+        # 2. Retrieve the specific PDF references tied to this exam session
+        exam_resp = supabase.table("Exams").select("references").eq("id", request.exam_session_id).execute()
+        references = exam_resp.data[0].get("references", ["All"]) if exam_resp.data else ["All"]
+        
+        # 3. Archive the rejected item so it vanishes from the teacher's active UI
+        supabase.table("Mock Exam Items").update({"status": "ARCHIVED"}).eq("id", request.old_item_id).execute()
+        
+        # 4. Trigger Celery. Passing the exam_session_id guarantees save_to_supabase() attaches it correctly
+        task = generate_assessment_item_task.delay(
+            subject=old_item.get("subject"),
+            competency=old_item.get("competency"),
+            target_blooms_level=old_item.get("blooms_level"),
+            selected_references=references,
+            exam_session_id=request.exam_session_id
+        )
+        
+        return {"message": "Regeneration task queued successfully.", "task_id": task.id}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/generate/blueprint")
 async def generate_blueprint(request: BlueprintGenerationRequest):
