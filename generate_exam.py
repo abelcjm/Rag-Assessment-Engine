@@ -1,4 +1,3 @@
-# generate_exam.py
 import os
 import sys
 import types
@@ -39,7 +38,6 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
-# --- INFRASTRUCTURE CONFIGURATION ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
 REDIS_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
@@ -51,14 +49,6 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 redis_client = redis.Redis.from_url(REDIS_URL)
 
-BLUEPRINT_MAP = {
-    "1": {"subject": "Abnormal Psychology", "file": "abnormal_psychology_blueprint.json"},
-    "2": {"subject": "Industrial-Organizational Psychology", "file": "industrial_organizational psychology_blueprint.json"},
-    "3": {"subject": "Psychological Assessment", "file": "psychological_assessment_psychometrician_blueprint.json"},
-    "4": {"subject": "Developmental Psychology", "file": "developmental_psychology_blueprint.json"}
-}
-
-# --- PYDANTIC SCHEMAS ---
 class ItemOptions(BaseModel):
     A: str
     B: str
@@ -74,7 +64,6 @@ class AssessmentItemSchema(BaseModel):
     correct_answer: str
     rationale: str
 
-# --- REDIS-BACKED CONCURRENCY & API KEY ROTATION ---
 raw_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
 API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 
@@ -87,7 +76,6 @@ def get_current_key():
 
 def rotate_key(failed_key=None):
     global EVALUATOR_LLM
-    
     with redis_client.lock("key_rotation_lock", timeout=10):
         current_index = int(redis_client.get("gemini_key_index") or 0)
         current_active = API_KEYS[current_index % len(API_KEYS)]
@@ -112,7 +100,6 @@ EVALUATOR_LLM = ChatGoogleGenerativeAI(
     google_api_key=get_current_key(), candidate_count=1, max_retries=2, timeout=60
 )
 
-# --- EMBEDDING & EVALUATION SETTINGS ---
 EMBEDDINGS = HuggingFaceEmbeddings(
     model_name="BAAI/bge-base-en-v1.5",
     model_kwargs={'trust_remote_code': True, 'device': DEVICE},
@@ -167,37 +154,29 @@ def save_to_supabase(item: dict, session_id: str):
     except Exception as e:
         print(f"\n[DB-ERROR] Failed to save to Supabase: {e}")
 
-def execute_core_generation_loop(subject, competency, target_blooms_level, selected_references, exam_session_id, celery_task=None):
-    """
-    Refactored core logic: Retrieves chunks ONCE outside the loop to save compute, 
-    then dynamically slices the chunk array inside the retry loop for prompt variations.
-    """
+@shared_task(bind=True)
+def generate_assessment_item_task(self, subject, competency, target_blooms_level, selected_references, exam_session_id):
     query = build_domain_query(subject, competency)
     
     MAX_RETRIES = 2
     attempt = 0
     current_final_k = 5
-    max_k_needed = 7 # The maximum chunks we might need if we have to expand context
+    max_k_needed = 7 
     
     best_item = None
     best_faithfulness = -1.0
     quota_retry_count = 0
     max_quota_retries = max(len(API_KEYS) * 2, 4)
     
-    # 1. ONE-TIME HEAVY RETRIEVAL
-    if celery_task:
-        celery_task.update_state(state='PROCESSING', meta={
-            'step': 'Retrieving Context', 'attempt': 1, 'details': f'Fetching {max_k_needed} chunks from vector database once...'
-        })
+    self.update_state(state='PROCESSING', meta={
+        'step': 'Retrieving Context', 'attempt': 1, 'details': f'Fetching {max_k_needed} chunks from vector database once...'
+    })
     
-    # Retrieve the maximum amount of chunks we might need for any retry iteration
     all_retrieved_chunks = retrieve_and_rerank(
         query=query, top_k=15, final_k=max_k_needed, reference_filter=selected_references
     )
     
-    # 2. RETRY LOOP FOR GENERATION & EVALUATION ONLY
     while attempt <= MAX_RETRIES:
-        # Dynamically slice the pre-retrieved chunks based on the current attempt's needs
         active_chunks = all_retrieved_chunks[:current_final_k]
         
         formatted_chunks, citations, raw_contexts = [], [], []
@@ -249,10 +228,9 @@ ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
             active_key = get_current_key()
             client = genai.Client(api_key=active_key)
             
-            if celery_task:
-                celery_task.update_state(state='PROCESSING', meta={
-                    'step': 'Generating Draft', 'attempt': attempt + 1, 'details': f'Drafting question via Gemini (using {current_final_k} chunks)...'
-                })
+            self.update_state(state='PROCESSING', meta={
+                'step': 'Generating Draft', 'attempt': attempt + 1, 'details': f'Drafting question via Gemini (using {current_final_k} chunks)...'
+            })
             
             response = client.models.generate_content(
                 model="gemini-3.5-flash-lite",
@@ -263,6 +241,19 @@ ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
                     temperature=0.4
                 )
             )   
+
+            # --- EXTRACT AND LOG TOKEN TELEMETRY ---
+            try:
+                usage = response.usage_metadata
+                if usage:
+                    supabase_client.table("Token_Logs").insert({
+                        "task_type": "Exam Generation",
+                        "prompt_tokens": usage.prompt_token_count,
+                        "completion_tokens": usage.candidates_token_count,
+                        "total_tokens": usage.total_token_count
+                    }).execute()
+            except Exception as e:
+                print(f"Failed to log telemetry: {e}")
             
             generated_item = json.loads(response.text)
             
@@ -281,10 +272,9 @@ ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
             
             current_evaluator = EVALUATOR_LLM
 
-            if celery_task:
-                celery_task.update_state(state='PROCESSING', meta={
-                    'step': 'Evaluating Faithfulness', 'attempt': attempt + 1, 'details': 'Running RAGAS hallucination checks...'
-                })
+            self.update_state(state='PROCESSING', meta={
+                'step': 'Evaluating Faithfulness', 'attempt': attempt + 1, 'details': 'Running RAGAS hallucination checks...'
+            })
             
             eval_f = evaluate(
                 dataset=eval_dataset, metrics=[Faithfulness()], llm=current_evaluator,
@@ -303,10 +293,9 @@ ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
                 best_item["eval_dataset"] = eval_dataset
 
             if f_score >= 0.75:
-                if celery_task:
-                    celery_task.update_state(state='PROCESSING', meta={
-                        'step': 'Evaluating Relevancy', 'attempt': attempt + 1, 'details': f'Faithfulness passed ({f_score:.2f}). Checking Relevancy...'
-                    })
+                self.update_state(state='PROCESSING', meta={
+                    'step': 'Evaluating Relevancy', 'attempt': attempt + 1, 'details': f'Faithfulness passed ({f_score:.2f}). Checking Relevancy...'
+                })
                 eval_s = evaluate(
                     dataset=eval_dataset, metrics=[ContextRelevance(), AnswerRelevancy(strictness=1)],
                     llm=current_evaluator, embeddings=EMBEDDINGS, run_config=RUN_CONFIG, raise_exceptions=True
@@ -328,10 +317,10 @@ ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
                     save_to_supabase(generated_item, exam_session_id)
                     return generated_item
                 else:
-                    if cr_score < 0.70: current_final_k = 3 # Shrink context window for next attempt
+                    if cr_score < 0.70: current_final_k = 3
                     attempt += 1
             else:
-                current_final_k = 7 # Expand context window for next attempt
+                current_final_k = 7 
                 attempt += 1
 
         except Exception as e:
@@ -374,65 +363,18 @@ ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
         return {"error": f"Failed generation for: {competency}"}
 
 @shared_task(bind=True)
-def generate_assessment_item_task(self, subject, competency, target_blooms_level, selected_references=["All"], exam_session_id=None):
-    """Fallback single-item generation for the regenerate endpoint."""
-    return execute_core_generation_loop(
-        subject, competency, target_blooms_level, selected_references, exam_session_id, celery_task=self
-    )
+def finalize_exam_session_task(self, results, exam_session_id):
+    try:
+        supabase_client.table("Exams").update({"global_status": "Pending"}).eq("exam_id", exam_session_id).execute()
+        print(f"\n[SUCCESS] Entire batch finished. UI updated for exam: {exam_session_id}")
+        return {"status": "Complete", "session_id": exam_session_id, "items_generated": len(results)}
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] Finalize callback failed: {str(e)}")
 
 @shared_task(bind=True)
-def generate_blueprint_batch_task(self, exam_session_id, blueprint_id, selected_pdfs):
-    """Executes a full blueprint generation loop asynchronously."""
+def fail_exam_session_task(self, request, exc, traceback, exam_session_id):
     try:
-        blueprint_config = BLUEPRINT_MAP.get(str(blueprint_id))
-        if not blueprint_config or not os.path.exists(blueprint_config["file"]):
-            raise ValueError(f"Invalid blueprint ID or missing file for {blueprint_id}")
-
-        with open(blueprint_config["file"], 'r', encoding='utf-8') as f:
-            blueprint_data = json.load(f)
-
-        for requirement in blueprint_data:
-            count = requirement.get("items_to_generate", 0)
-            for _ in range(count):
-                execute_core_generation_loop(
-                    subject=blueprint_config["subject"],
-                    competency=requirement["competency"],
-                    target_blooms_level=requirement["bloom_level"],
-                    selected_references=selected_pdfs,
-                    exam_session_id=exam_session_id,
-                    celery_task=self
-                )
-                
-        supabase_client.table("Exams").update({"global_status": "Pending"}).eq("id", exam_session_id).execute()
-        return {"status": "Success", "session_id": exam_session_id}
-
+        supabase_client.table("Exams").update({"global_status": "Failed"}).eq("exam_id", exam_session_id).execute()
+        print(f"\n[CRITICAL ERROR] Exam batch {exam_session_id} failed: {exc}")
     except Exception as e:
-        error_details = str(e)
-        print(f"\n[CRITICAL ERROR] Blueprint batch failed: {error_details}")
-        supabase_client.table("Exams").update({"global_status": "Failed"}).eq("id", exam_session_id).execute()
-        return {"status": "Failed", "error": error_details}
-
-@shared_task(bind=True)
-def generate_custom_batch_task(self, exam_session_id, items, selected_pdfs):
-    """Executes custom parameter generation loops asynchronously."""
-    try:
-        for req in items:
-            count = req.get("count", 1)
-            for _ in range(count):
-                execute_core_generation_loop(
-                    subject=req["subject"],
-                    competency=req["competency"],
-                    target_blooms_level=req["bloom"],
-                    selected_references=selected_pdfs,
-                    exam_session_id=exam_session_id,
-                    celery_task=self
-                )
-                
-        supabase_client.table("Exams").update({"global_status": "Pending"}).eq("id", exam_session_id).execute()
-        return {"status": "Success", "session_id": exam_session_id}
-
-    except Exception as e:
-        error_details = str(e)
-        print(f"\n[CRITICAL ERROR] Custom batch failed: {error_details}")
-        supabase_client.table("Exams").update({"global_status": "Failed"}).eq("id", exam_session_id).execute()
-        return {"status": "Failed", "error": error_details}
+        pass
