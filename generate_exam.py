@@ -89,6 +89,9 @@ class SupabaseTelemetryCallbackHandler(BaseCallbackHandler):
         except Exception as e:
             print(f"\n[TELEMETRY ERROR] Failed to log evaluation telemetry: {e}")
 
+# Initialize the handler FIRST so it can be attached to the LLMs
+TELEMETRY_HANDLER = SupabaseTelemetryCallbackHandler()
+
 class ItemOptions(BaseModel):
     A: str
     B: str
@@ -129,15 +132,19 @@ def rotate_key(failed_key=None):
         new_key = API_KEYS[new_index % len(API_KEYS)]
         print(f"\n[!] Quota Exceeded. Rotating to API Key {new_index % len(API_KEYS) + 1}/{len(API_KEYS)}...")
         
+        # Attach callback to the rotated LLM
         EVALUATOR_LLM = ChatGoogleGenerativeAI(
             model="gemini-3.1-flash-lite", temperature=0.0,
-            google_api_key=new_key, candidate_count=1, max_retries=2, timeout=60
+            google_api_key=new_key, candidate_count=1, max_retries=2, timeout=60,
+            callbacks=[TELEMETRY_HANDLER]
         )
         return new_key
 
+# Attach callback to the main LLM
 EVALUATOR_LLM = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite", temperature=0.0,
-    google_api_key=get_current_key(), candidate_count=1, max_retries=2, timeout=60
+    google_api_key=get_current_key(), candidate_count=1, max_retries=2, timeout=60,
+    callbacks=[TELEMETRY_HANDLER]
 )
 
 EMBEDDINGS = HuggingFaceEmbeddings(
@@ -146,9 +153,8 @@ EMBEDDINGS = HuggingFaceEmbeddings(
     encode_kwargs={'normalize_embeddings': True}
 )
 
-# Inject the telemetry handler into RAGAS configuration
-TELEMETRY_HANDLER = SupabaseTelemetryCallbackHandler()
-RUN_CONFIG = RunConfig(max_workers=4, callbacks=[TELEMETRY_HANDLER])
+# RunConfig is clean again without callbacks
+RUN_CONFIG = RunConfig(max_workers=4)
 
 def resolve_context_metric_value(df_row):
     for col in ["nv_context_relevance", "context_relevance", "context_relevancy"]:

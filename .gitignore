@@ -24,3 +24,5 @@ abnormal_psychology_blueprint.json
 # Docker files
 docker-compose.yml
 Dockerfile
+
+celerybeat-schedule
