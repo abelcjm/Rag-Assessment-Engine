@@ -13,9 +13,17 @@ celery_app = Celery(
     include=["hybrid_ingestion", "generate_exam"] 
 )
 
-# Optional: Configure routing and concurrency limits
+# Configure routing, concurrency limits, and tracking
 celery_app.conf.update(
     task_track_started=True,
     result_extended=True,
     worker_prefetch_multiplier=1 # Prevents one worker from hoarding all tasks
 )
+
+# --- CELERY BEAT SCHEDULE FOR NEXT.JS DASHBOARD ---
+celery_app.conf.beat_schedule = {
+    'worker-health-heartbeat': {
+        'task': 'generate_exam.heartbeat_task',
+        'schedule': 60.0,
+    },
+}

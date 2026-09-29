@@ -8,6 +8,7 @@ import math
 import re
 import torch
 import redis
+from datetime import datetime, timezone
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from celery import shared_task
@@ -35,6 +36,8 @@ except ImportError:
 from ragas.run_config import RunConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
 
 load_dotenv()
 
@@ -48,6 +51,43 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 redis_client = redis.Redis.from_url(REDIS_URL)
+
+# --- LANGCHAIN TELEMETRY INTERCEPTOR ---
+class SupabaseTelemetryCallbackHandler(BaseCallbackHandler):
+    """Intercepts LangChain LLM calls from RAGAS to log token usage."""
+    def on_llm_end(self, response: LLMResult, **kwargs) -> None:
+        try:
+            prompt_tokens = 0
+            completion_tokens = 0
+            total_tokens = 0
+            
+            # 1. Try the standard LangChain dictionary route
+            if response.llm_output and "token_usage" in response.llm_output:
+                usage = response.llm_output["token_usage"]
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = usage.get("total_tokens", 0)
+            
+            # 2. Fallback for ChatGoogleGenerativeAI nested metadata quirk
+            elif response.generations and response.generations[0]:
+                first_gen = response.generations[0][0]
+                if hasattr(first_gen, 'message') and hasattr(first_gen.message, 'usage_metadata'):
+                    usage = first_gen.message.usage_metadata
+                    if usage:
+                        prompt_tokens = usage.get("input_tokens", usage.get("prompt_token_count", 0))
+                        completion_tokens = usage.get("output_tokens", usage.get("candidates_token_count", 0))
+                        total_tokens = usage.get("total_tokens", usage.get("total_token_count", 0))
+            
+            # Only execute the DB insert if we successfully captured tokens
+            if total_tokens > 0:
+                supabase_client.table("Token_Logs").insert({
+                    "task_type": "Item Evaluation",
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens
+                }).execute()
+        except Exception as e:
+            print(f"\n[TELEMETRY ERROR] Failed to log evaluation telemetry: {e}")
 
 class ItemOptions(BaseModel):
     A: str
@@ -106,7 +146,9 @@ EMBEDDINGS = HuggingFaceEmbeddings(
     encode_kwargs={'normalize_embeddings': True}
 )
 
-RUN_CONFIG = RunConfig(max_workers=4)
+# Inject the telemetry handler into RAGAS configuration
+TELEMETRY_HANDLER = SupabaseTelemetryCallbackHandler()
+RUN_CONFIG = RunConfig(max_workers=4, callbacks=[TELEMETRY_HANDLER])
 
 def resolve_context_metric_value(df_row):
     for col in ["nv_context_relevance", "context_relevance", "context_relevancy"]:
@@ -378,3 +420,14 @@ def fail_exam_session_task(self, request, exc, traceback, exam_session_id):
         print(f"\n[CRITICAL ERROR] Exam batch {exam_session_id} failed: {exc}")
     except Exception as e:
         pass
+
+@shared_task(bind=True)
+def heartbeat_task(self):
+    try:
+        supabase_client.table("Worker_Health").upsert({
+            "worker_name": "ai_celery_worker",
+            "status": "operational",
+            "last_heartbeat": datetime.now(timezone.utc).isoformat()
+        }).execute()
+    except Exception as e:
+        print(f"\n[HEARTBEAT ERROR] Failed to ping Supabase: {str(e)}")
