@@ -1,5 +1,3 @@
-# generate_exam.py
-
 import os
 import sys
 import types
@@ -91,6 +89,18 @@ class AssessmentBatchSchema(BaseModel):
     items: List[AssessmentItemSchema] = Field(
         description="List of distinct, high-quality assessment items generated for the competency."
     )
+
+# --- NEW HELPERS FOR PYDANTIC COMPATIBILITY BUG ---
+def strip_additional_properties(schema: dict) -> dict:
+    """Recursively removes the unsupported 'additionalProperties' key from a Pydantic schema."""
+    if isinstance(schema, dict):
+        schema.pop("additionalProperties", None)
+        for key, list_or_dict in list(schema.items()):
+            strip_additional_properties(list_or_dict)
+    elif isinstance(schema, list):
+        for item in schema:
+            strip_additional_properties(item)
+    return schema
 
 # --- 2. TELEMETRY & API CONFIGURATION ---
 class SupabaseTelemetryCallbackHandler(BaseCallbackHandler):
@@ -287,6 +297,10 @@ def generate_assessment_batch_task(self, subject: str, competency: str, target_b
     # Fetch global subject settings from Supabase (runs once per batch group)
     global_subject_pool = get_domain_settings(subject)
 
+    # NEW: Fetch and clean schema outside the loop
+    raw_schema = AssessmentBatchSchema.model_json_schema()
+    clean_schema = strip_additional_properties(raw_schema)
+
     for batch_idx, batch_count in enumerate(sub_batch_counts):
         attempt = 0
         MAX_RETRIES = 2
@@ -387,7 +401,7 @@ COGNITIVE LEVEL INSTRUCTION (LOTS - {target_blooms_level}):
                     contents=final_prompt,
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=AssessmentBatchSchema,
+                        response_schema=clean_schema, # UPDATED: Use cleaned schema dict here
                         temperature=0.35
                     )
                 )

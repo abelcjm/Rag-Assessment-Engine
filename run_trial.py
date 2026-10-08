@@ -1,5 +1,3 @@
-# run_trial.py
-
 import os
 import sys
 import types
@@ -87,6 +85,17 @@ class AssessmentBatchSchema(BaseModel):
     items: List[AssessmentItemSchema] = Field(description="List of assessment items.")
 
 # --- Helpers ---
+def strip_additional_properties(schema: dict) -> dict:
+    """Recursively removes the unsupported 'additionalProperties' key from a Pydantic schema."""
+    if isinstance(schema, dict):
+        schema.pop("additionalProperties", None)
+        for key, list_or_dict in list(schema.items()):
+            strip_additional_properties(list_or_dict)
+    elif isinstance(schema, list):
+        for item in schema:
+            strip_additional_properties(item)
+    return schema
+
 def clean_question_stem(stem: str) -> str:
     patterns = [
         r"^(According to the (provided |retrieved )?(text|passage|context|article|document|excerpt),?\s*)",
@@ -139,7 +148,6 @@ def rewrite_search_query(subject: str, competency: str, failed_query: str) -> st
     except Exception:
         return f"{subject} {competency} core concepts principles"
 
-
 def run_single_batch(subject: str, competency: str, target_blooms: str, items_to_generate: int, selected_references: list):
     base_query = build_domain_query(subject, competency)
     active_query = base_query
@@ -147,6 +155,10 @@ def run_single_batch(subject: str, competency: str, target_blooms: str, items_to
     max_retries = 2
     current_final_k = 7
     domain_settings = get_domain_settings(subject)
+
+    # Extract and clean schema outside the loop
+    raw_schema = AssessmentBatchSchema.model_json_schema()
+    clean_schema = strip_additional_properties(raw_schema)
 
     while attempt <= max_retries:
         print(f"\n[Retrieval] Attempt {attempt + 1}: Querying vector DB...")
@@ -207,7 +219,7 @@ STRICT PSYCHOMETRIC PRINCIPLES:
             contents=final_prompt,
             config=genai_types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=AssessmentBatchSchema,
+                response_schema=clean_schema, # Using the cleaned dictionary
                 temperature=0.35
             )
         )
