@@ -10,8 +10,10 @@ from supabase import create_client, Client
 
 from celery_app import celery_app
 from hybrid_ingestion import batch_ingest_task
+
+# UPGRADED: Importing the new batch task
 from generate_exam import (
-    generate_assessment_item_task,
+    generate_assessment_batch_task,
     finalize_exam_session_task,
     fail_exam_session_task
 )
@@ -47,21 +49,25 @@ class BlueprintGenerationRequest(BaseModel):
     blueprint_id: str
     references: List[str] = ["All"]
     exam_session_id: str
+    custom_settings: Optional[List[str]] = None  # NEW: Global settings override
 
 class CustomBlock(BaseModel):
     competency: str
     bloom: str
     count: int
+    custom_settings: Optional[List[str]] = None  # NEW: Block-level settings override
 
 class CustomBatchRequest(BaseModel):
     subject: str
     blocks: List[CustomBlock]
     references: List[str] = ["All"]
     exam_session_id: str
+    custom_settings: Optional[List[str]] = None  # NEW: Global settings override
 
 class RegenerateRequest(BaseModel):
     old_item_id: str
     exam_session_id: str
+
 
 BLUEPRINT_MAP = {
     "1": {"subject": "Abnormal Psychology", "file": "abnormal_psychology_blueprint.json"},
@@ -69,6 +75,7 @@ BLUEPRINT_MAP = {
     "3": {"subject": "Psychological Assessment", "file": "psychological_assessment_psychometrician_blueprint.json"},
     "4": {"subject": "Developmental Psychology", "file": "developmental_psychology_blueprint.json"}
 }
+
 
 # --- Vectorization Endpoints ---
 @app.post("/api/v1/vectorize")
@@ -105,6 +112,7 @@ async def get_task_status(task_id: str):
         
     return response
 
+
 # --- Generation Endpoints using Chords ---
 @app.post("/api/v1/generate/blueprint")
 async def generate_blueprint_async(request: BlueprintGenerationRequest):
@@ -118,13 +126,18 @@ async def generate_blueprint_async(request: BlueprintGenerationRequest):
     tasks = []
     for requirement in blueprint_data:
         count = requirement.get("items_to_generate", 0)
-        for _ in range(count):
-            tasks.append(generate_assessment_item_task.s(
+        
+        # UPGRADED: No longer looping to create single-item tasks. 
+        # Fires one batch task per competency with items_to_generate passed directly.
+        if count > 0:
+            tasks.append(generate_assessment_batch_task.s(
                 subject=blueprint_config["subject"],
                 competency=requirement["competency"],
                 target_blooms_level=requirement["bloom_level"],
+                items_to_generate=count,
                 selected_references=request.references,
-                exam_session_id=request.exam_session_id
+                exam_session_id=request.exam_session_id,
+                custom_settings=request.custom_settings
             ))
 
     if not tasks:
@@ -140,13 +153,18 @@ async def generate_blueprint_async(request: BlueprintGenerationRequest):
 async def generate_custom_batch_async(request: CustomBatchRequest):
     tasks = []
     for block in request.blocks:
-        for _ in range(block.count):
-            tasks.append(generate_assessment_item_task.s(
+        if block.count > 0:
+            # Prioritize block-level custom settings over global custom settings
+            active_settings = block.custom_settings or request.custom_settings
+            
+            tasks.append(generate_assessment_batch_task.s(
                 subject=request.subject,
                 competency=block.competency,
                 target_blooms_level=block.bloom,
+                items_to_generate=block.count,
                 selected_references=request.references,
-                exam_session_id=request.exam_session_id
+                exam_session_id=request.exam_session_id,
+                custom_settings=active_settings
             ))
             
     if not tasks:
@@ -168,18 +186,20 @@ async def regenerate_item(request: RegenerateRequest):
             raise HTTPException(status_code=404, detail="Original item not found in the database.")
         old_item = item_resp.data[0]
         
-        # Uses the corrected exam_id column
         exam_resp = supabase.table("Exams").select("references").eq("exam_id", request.exam_session_id).execute()
         references = exam_resp.data[0].get("references", ["All"]) if exam_resp.data else ["All"]
         
         supabase.table("Mock Exam Items").update({"status": "ARCHIVED"}).eq("id", request.old_item_id).execute()
         
-        task = generate_assessment_item_task.delay(
+        # UPGRADED: Uses the batch task but with items_to_generate=1 to regenerate a single question
+        task = generate_assessment_batch_task.delay(
             subject=old_item.get("subject"),
             competency=old_item.get("competency"),
             target_blooms_level=old_item.get("blooms_level"),
+            items_to_generate=1,
             selected_references=references,
-            exam_session_id=request.exam_session_id
+            exam_session_id=request.exam_session_id,
+            custom_settings=None
         )
         return {"message": "Regeneration task queued successfully.", "task_id": task.id}
     except Exception as e:

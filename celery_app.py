@@ -13,11 +13,22 @@ celery_app = Celery(
     include=["hybrid_ingestion", "generate_exam"] 
 )
 
-# Configure routing, concurrency limits, and tracking
+# Configure routing, concurrency limits, tracking, and UPGRADED time limits
 celery_app.conf.update(
     task_track_started=True,
     result_extended=True,
-    worker_prefetch_multiplier=1 # Prevents one worker from hoarding all tasks
+    
+    # Prevents one worker from hoarding tasks it doesn't have RAM for
+    worker_prefetch_multiplier=1, 
+    
+    # --- NEW BATCH GENERATION TIMEOUT UPGRADES ---
+    # Increased because a single task now generates up to 4 CoT items, 
+    # executes query rewrites, and runs RAGAS on the batch.
+    task_soft_time_limit=120,   # 2 minutes before raising SoftTimeLimitExceeded
+    task_time_limit=150,        # 2.5 minutes hard kill to prevent deadlocks
+    
+    # CRITICAL: Ensures tasks are re-queued if the worker crashes (e.g., GPU Out of Memory)
+    task_acks_late=True         
 )
 
 # --- CELERY BEAT SCHEDULE FOR NEXT.JS DASHBOARD ---

@@ -1,3 +1,5 @@
+# generate_exam.py
+
 import os
 import sys
 import types
@@ -6,14 +8,17 @@ import warnings
 import time
 import math
 import re
+import random
 import torch
 import redis
 from datetime import datetime, timezone
-from pydantic import BaseModel
+from typing import List, Dict
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from celery import shared_task
 from supabase.client import create_client, Client
 
+# LangChain community mock patch
 dummy_chat = types.ModuleType("langchain_community.chat_models.vertexai")
 dummy_chat.ChatVertexAI = type("ChatVertexAI", (object,), {})
 sys.modules["langchain_community.chat_models.vertexai"] = dummy_chat
@@ -52,23 +57,53 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 redis_client = redis.Redis.from_url(REDIS_URL)
 
-# --- LANGCHAIN TELEMETRY INTERCEPTOR ---
+# --- 1. CHAIN-OF-THOUGHT PYDANTIC SCHEMAS ---
+class ItemOptions(BaseModel):
+    A: str = Field(description="Option A")
+    B: str = Field(description="Option B")
+    C: str = Field(description="Option C")
+    D: str = Field(description="Option D")
+
+class AssessmentItemSchema(BaseModel):
+    step_1_core_concept: str = Field(
+        description="Isolate the specific mechanism, psychological model, or criteria being tested."
+    )
+    step_2_vignette_design: str = Field(
+        description="Explain how the scenario or conceptual problem will test application without leaking textbook definitions."
+    )
+    question: str = Field(
+        description="The exam question stem. Must strictly adhere to Bloom's guidelines and never leak the definition."
+    )
+    options: ItemOptions = Field(
+        description="Four structurally balanced, homogeneous options (A, B, C, D)."
+    )
+    correct_answer: str = Field(
+        description="The correct option key: must be exactly 'A', 'B', 'C', or 'D'."
+    )
+    rationale: str = Field(
+        description="Textbook-grounded explanation verifying why the correct option is right, citing the source document and page."
+    )
+    distractor_rationales: Dict[str, str] = Field(
+        description="Provide keys for the 3 incorrect options (e.g., 'A', 'B', 'C') explaining why a partially knowledgeable examinee would choose each."
+    )
+
+class AssessmentBatchSchema(BaseModel):
+    items: List[AssessmentItemSchema] = Field(
+        description="List of distinct, high-quality assessment items generated for the competency."
+    )
+
+# --- 2. TELEMETRY & API CONFIGURATION ---
 class SupabaseTelemetryCallbackHandler(BaseCallbackHandler):
     """Intercepts LangChain LLM calls from RAGAS to log token usage."""
     def on_llm_end(self, response: LLMResult, **kwargs) -> None:
         try:
-            prompt_tokens = 0
-            completion_tokens = 0
-            total_tokens = 0
+            prompt_tokens, completion_tokens, total_tokens = 0, 0, 0
             
-            # 1. Try the standard LangChain dictionary route
             if response.llm_output and "token_usage" in response.llm_output:
                 usage = response.llm_output["token_usage"]
                 prompt_tokens = usage.get("prompt_tokens", 0)
                 completion_tokens = usage.get("completion_tokens", 0)
                 total_tokens = usage.get("total_tokens", 0)
-            
-            # 2. Fallback for ChatGoogleGenerativeAI nested metadata quirk
             elif response.generations and response.generations[0]:
                 first_gen = response.generations[0][0]
                 if hasattr(first_gen, 'message') and hasattr(first_gen.message, 'usage_metadata'):
@@ -78,7 +113,6 @@ class SupabaseTelemetryCallbackHandler(BaseCallbackHandler):
                         completion_tokens = usage.get("output_tokens", usage.get("candidates_token_count", 0))
                         total_tokens = usage.get("total_tokens", usage.get("total_token_count", 0))
             
-            # Only execute the DB insert if we successfully captured tokens
             if total_tokens > 0:
                 supabase_client.table("Token_Logs").insert({
                     "task_type": "Item Evaluation",
@@ -89,23 +123,7 @@ class SupabaseTelemetryCallbackHandler(BaseCallbackHandler):
         except Exception as e:
             print(f"\n[TELEMETRY ERROR] Failed to log evaluation telemetry: {e}")
 
-# Initialize the handler FIRST so it can be attached to the LLMs
 TELEMETRY_HANDLER = SupabaseTelemetryCallbackHandler()
-
-class ItemOptions(BaseModel):
-    A: str
-    B: str
-    C: str
-    D: str
-
-class AssessmentItemSchema(BaseModel):
-    subject: str
-    competency: str
-    blooms_level: str
-    question: str
-    options: ItemOptions
-    correct_answer: str
-    rationale: str
 
 raw_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
 API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
@@ -124,7 +142,6 @@ def rotate_key(failed_key=None):
         current_active = API_KEYS[current_index % len(API_KEYS)]
         
         if failed_key is not None and failed_key != current_active:
-            print(f"\n[i] Key was already rotated to {current_index % len(API_KEYS) + 1}/{len(API_KEYS)} by another worker.")
             return current_active
 
         new_index = current_index + 1
@@ -132,7 +149,6 @@ def rotate_key(failed_key=None):
         new_key = API_KEYS[new_index % len(API_KEYS)]
         print(f"\n[!] Quota Exceeded. Rotating to API Key {new_index % len(API_KEYS) + 1}/{len(API_KEYS)}...")
         
-        # Attach callback to the rotated LLM
         EVALUATOR_LLM = ChatGoogleGenerativeAI(
             model="gemini-3.1-flash-lite", temperature=0.0,
             google_api_key=new_key, candidate_count=1, max_retries=2, timeout=60,
@@ -140,7 +156,6 @@ def rotate_key(failed_key=None):
         )
         return new_key
 
-# Attach callback to the main LLM
 EVALUATOR_LLM = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite", temperature=0.0,
     google_api_key=get_current_key(), candidate_count=1, max_retries=2, timeout=60,
@@ -153,14 +168,22 @@ EMBEDDINGS = HuggingFaceEmbeddings(
     encode_kwargs={'normalize_embeddings': True}
 )
 
-# RunConfig is clean again without callbacks
 RUN_CONFIG = RunConfig(max_workers=4)
 
-def resolve_context_metric_value(df_row):
-    for col in ["nv_context_relevance", "context_relevance", "context_relevancy"]:
-        if col in df_row:
-            return df_row[col]
-    return 0.0
+# --- 3. UTILITY FUNCTIONS ---
+def get_domain_settings(subject: str) -> list:
+    """Fetches the global vignette settings for a specific subject from the normalized Supabase table."""
+    try:
+        response = supabase_client.table("Domain_Settings").select("setting_name").eq("subject", subject).execute()
+        if response.data:
+            pool = [row["setting_name"] for row in response.data]
+            if len(pool) > 0:
+                return pool
+    except Exception as e:
+        print(f"[DB-WARNING] Failed to fetch Domain_Settings for {subject}: {e}")
+    
+    # Safe fallback if DB fetch fails or no rows exist for the subject
+    return ["General workplace", "Academic setting", "Clinical setting", "Everyday social interaction"]
 
 def clean_question_stem(stem: str) -> str:
     patterns = [
@@ -181,250 +204,321 @@ def clean_question_stem(stem: str) -> str:
 def build_domain_query(subject: str, competency: str) -> str:
     subject_lower = subject.lower()
     if "abnormal" in subject_lower:
-        terms = "diagnostic criteria symptoms DSM classification etiology features"
+        terms = "diagnostic criteria symptoms DSM classification etiology features differential diagnosis"
     elif "industrial" in subject_lower or "organizational" in subject_lower:
-        terms = "workplace behavior management organizational theory HRM leadership dynamics"
+        terms = "workplace behavior management organizational theory HRM leadership dynamics interventions"
     elif "assessment" in subject_lower:
-        terms = "psychometrics reliability validity test administration norms scoring interpretation"
+        terms = "psychometrics reliability validity test administration norms scoring interpretation Classical Test Theory"
     elif "developmental" in subject_lower:
-        terms = "stages cognitive moral psychosocial milestones lifespan development"
+        terms = "stages cognitive moral psychosocial milestones lifespan development transitions"
     else:
-        terms = "principles theories definitions concepts application"
+        terms = "principles theories definitions concepts application constructs"
     return f"{subject} {competency} {terms}"
+
+def rewrite_search_query(subject: str, competency: str, failed_query: str) -> str:
+    """Invokes Gemini to semantically rewrite the query when context relevance is low."""
+    try:
+        client = genai.Client(api_key=get_current_key())
+        rewrite_prompt = (
+            f"You are a psychometrics information retrieval assistant.\n"
+            f"Subject: {subject}\nCompetency: {competency}\nPrevious query: {failed_query}\n"
+            f"Generate a concise, alternate dense search query containing related synonyms, alternate theorists, "
+            f"and clinical or organizational sub-terms to retrieve better textbook context from a vector database. "
+            f"Output ONLY the query string with no commentary or quotes."
+        )
+        res = client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=rewrite_prompt,
+            config=genai_types.GenerateContentConfig(temperature=0.3, max_output_tokens=50)
+        )
+        rewritten = res.text.strip().replace('"', '')
+        return rewritten if rewritten else f"{subject} {competency} theoretical foundation models"
+    except Exception:
+        return f"{subject} {competency} core concepts principles models"
 
 def save_to_supabase(item: dict, session_id: str):
     try:
-        payload = item.copy()
-        payload["exam_session_id"] = session_id
+        payload = {
+            "exam_session_id": session_id,
+            "subject": item.get("subject"),
+            "competency": item.get("competency"),
+            "blooms_level": item.get("blooms_level"),
+            "question": item.get("question"),
+            "options": item.get("options"),
+            "correct_answer": item.get("correct_answer"),
+            "rationale": item.get("rationale"),
+            "distractor_rationales": item.get("distractor_rationales", {}),
+            "cot_metadata": {
+                "step_1_core_concept": item.get("step_1_core_concept", ""),
+                "step_2_vignette_design": item.get("step_2_vignette_design", "")
+            },
+            "citations": item.get("citations", []),
+            "evaluation_metrics": item.get("evaluation_metrics", {}),
+            "status": item.get("status", "PASSED"),
+            "calibration_attempts": item.get("calibration_attempts", 0)
+        }
         response = supabase_client.table("Mock Exam Items").insert(payload).execute()
         if response.data:
-            print(f"\n[DB-SUCCESS] Item saved to Supabase with ID: {response.data[0]['id']}")
+            print(f"[DB-SUCCESS] Item saved with ID: {response.data[0]['id']}")
     except Exception as e:
-        print(f"\n[DB-ERROR] Failed to save to Supabase: {e}")
+        print(f"[DB-ERROR] Failed to save item to Supabase: {e}")
 
+# --- 4. BATCH GENERATION CELERY TASK ---
 @shared_task(bind=True)
-def generate_assessment_item_task(self, subject, competency, target_blooms_level, selected_references, exam_session_id):
-    query = build_domain_query(subject, competency)
+def generate_assessment_batch_task(self, subject: str, competency: str, target_blooms_level: str,
+                                   items_to_generate: int, selected_references: list, exam_session_id: str,
+                                   custom_settings: list = None):
+    """
+    Batches question generation according to the Table of Specifications.
+    Splits requests exceeding MAX_BATCH_SIZE (4) into consecutive sub-batches.
+    Supports injecting a custom_settings array to override the global Domain_Settings table.
+    """
+    MAX_BATCH_SIZE = 4
+    sub_batch_counts = []
+    remaining = items_to_generate
+    while remaining > 0:
+        current_chunk = min(remaining, MAX_BATCH_SIZE)
+        sub_batch_counts.append(current_chunk)
+        remaining -= current_chunk
+
+    all_processed_items = []
+    base_query = build_domain_query(subject, competency)
     
-    MAX_RETRIES = 2
-    attempt = 0
-    current_final_k = 5
-    max_k_needed = 7 
-    
-    best_item = None
-    best_faithfulness = -1.0
-    quota_retry_count = 0
-    max_quota_retries = max(len(API_KEYS) * 2, 4)
-    
-    self.update_state(state='PROCESSING', meta={
-        'step': 'Retrieving Context', 'attempt': 1, 'details': f'Fetching {max_k_needed} chunks from vector database once...'
-    })
-    
-    all_retrieved_chunks = retrieve_and_rerank(
-        query=query, top_k=15, final_k=max_k_needed, reference_filter=selected_references
-    )
-    
-    while attempt <= MAX_RETRIES:
-        active_chunks = all_retrieved_chunks[:current_final_k]
-        
-        formatted_chunks, citations, raw_contexts = [], [], []
-        for chunk in active_chunks:
-            source_name = chunk.metadata.get("source", "Unknown Document")
-            page_num = chunk.metadata.get("page", "Unknown Page")
-            content = chunk.page_content.strip()
+    # Fetch global subject settings from Supabase (runs once per batch group)
+    global_subject_pool = get_domain_settings(subject)
+
+    for batch_idx, batch_count in enumerate(sub_batch_counts):
+        attempt = 0
+        MAX_RETRIES = 2
+        active_query = base_query
+        current_final_k = 7
+
+        while attempt <= MAX_RETRIES:
+            self.update_state(state='PROCESSING', meta={
+                'step': 'Retrieval & Rerank',
+                'batch': f"{batch_idx + 1}/{len(sub_batch_counts)}",
+                'attempt': attempt + 1,
+                'details': f'Retrieving top {current_final_k} chunks for {batch_count} items...'
+            })
+
+            retrieved_chunks = retrieve_and_rerank(
+                query=active_query, top_k=20, final_k=current_final_k, reference_filter=selected_references
+            )
+
+            if not retrieved_chunks:
+                active_query = rewrite_search_query(subject, competency, active_query)
+                attempt += 1
+                continue
+
+            formatted_chunks, citations, raw_contexts = [], [], []
+            for chunk in retrieved_chunks:
+                s_name = chunk.metadata.get("source", "Unknown Document")
+                p_num = chunk.metadata.get("page", "Unknown Page")
+                body = chunk.page_content.strip()
+                citations.append({"source": s_name, "page": p_num})
+                raw_contexts.append(body)
+                formatted_chunks.append(f"--- SOURCE: {s_name} (Page {p_num}) ---\n{body}\n--- END ---")
+
+            context_block = "\n\n".join(formatted_chunks)
+
+            # --- BLOOM'S BRANCHING PROMPT CONSTRUCTION ---
+            is_hots = target_blooms_level.lower() in ["applying", "analyzing", "evaluating", "creating"]
             
-            citations.append({"source": source_name, "page": page_num})
-            raw_contexts.append(content)
-            
-            chunk_text = (f"--- START OF SOURCE ---\nDocument: {source_name}\nPage: {page_num}\nContent:\n{content}\n--- END OF SOURCE ---")
-            formatted_chunks.append(chunk_text)
-            
-        retrieved_context = "\n\n".join(formatted_chunks) if formatted_chunks else "No context available."
-        
-        prompt = f"""You are a licensed Psychometrician and psychometric test developer creating formal multiple-choice items for the Philippine Psychometrician Licensure Examination (BLEPP).
+            prompt_header = f"""You are a licensed Psychometrician and assessment specialist designing formal multiple-choice items for the Philippine Psychometrician Licensure Examination (BLEPP).
 
 TARGET DOMAIN: {subject}
 TARGET COMPETENCY: {competency}
-TARGET COGNITIVE LEVEL (BLOOM'S): {target_blooms_level}
+TARGET COGNITIVE LEVEL: {target_blooms_level}
+ITEMS TO GENERATE: {batch_count}
 
-SOURCE MATERIAL (TEXTBOOK EXCERPTS):
+TEXTBOOK EXCERPTS:
 <context>
-{retrieved_context}
+{context_block}
 </context>
 
-ITEM WRITING RULES (STRICT COMPLIANCE REQUIRED):
-1. NO SOURCE REFERENCING IN STEM:
-   - NEVER start or include phrases like "According to the text", "Based on the provided passage", "As discussed in the excerpt", or "According to the author".
-   - Treat the domain concepts as established, objective facts or standard scientific principles.
-   - The question must stand alone as an authentic exam item. The examinee does not have access to any reference text.
-
-2. AUTHENTIC SCENARIOS & VIGNETTES:
-   - For application/analysis levels, construct a realistic workplace, clinical, or testing scenario.
-   - Vary the organizations, industries, and names used (e.g., healthcare, education, retail, tech, public sector). Avoid generic clichés.
-
-3. STRICT OPTION HOMOGENEITY:
-   - All 4 options (A, B, C, D) MUST be approximately equal in length, grammatical structure, and complexity.
-   - Do NOT make the correct answer significantly longer or more detailed than the distractors.
-   - Distractors must be plausible, mutually exclusive alternatives within the same conceptual category.
-
-4. GROUNDING & RATIONALE:
-   - The item's factual truth must be grounded in the context provided.
-   - The 'rationale' field must cite the exact Document name and Page number where the answer is verified.
+STRICT PSYCHOMETRIC PRINCIPLES:
+1. NO DEFINITION LEAKING: The scenario stem must describe a concrete behavior, structural condition, or practical problem. NEVER state the verbatim textbook definition or include dead-giveaway terminology in the stem.
+2. DISTRACTOR HOMOGENEITY: All 4 options (A, B, C, D) must belong to the exact same conceptual taxonomy or level of abstraction. Keep options uniform in length, grammatical structure, and syntax.
+3. THE COVER TEST: A prepared examinee must not be able to guess the answer by looking at the options alone without analyzing the stem, nor should the answer stand out through superficial cues.
+4. CHAIN-OF-THOUGHT MANDATE: You must complete 'step_1_core_concept', 'step_2_vignette_design', and 'distractor_rationales' for every item.
 """
-        
-        try:
-            active_key = get_current_key()
-            client = genai.Client(api_key=active_key)
-            
-            self.update_state(state='PROCESSING', meta={
-                'step': 'Generating Draft', 'attempt': attempt + 1, 'details': f'Drafting question via Gemini (using {current_final_k} chunks)...'
-            })
-            
-            response = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=AssessmentItemSchema,
-                    temperature=0.4
-                )
-            )   
 
-            # --- EXTRACT AND LOG TOKEN TELEMETRY ---
-            try:
-                usage = response.usage_metadata
-                if usage:
-                    supabase_client.table("Token_Logs").insert({
-                        "task_type": "Exam Generation",
-                        "prompt_tokens": usage.prompt_token_count,
-                        "completion_tokens": usage.candidates_token_count,
-                        "total_tokens": usage.total_token_count
-                    }).execute()
-            except Exception as e:
-                print(f"Failed to log telemetry: {e}")
-            
-            generated_item = json.loads(response.text)
-            
-            generated_item["question"] = clean_question_stem(generated_item["question"])
-            generated_item["citations"] = citations
-            generated_item["retrieved_contexts"] = raw_contexts
-            
-            eval_dataset = Dataset.from_dict({
-                "user_input": [generated_item.get("question", "")],
-                "question": [generated_item.get("question", "")],
-                "response": [f"{generated_item.get('options', {}).get(generated_item.get('correct_answer', ''), '')}. {generated_item.get('rationale', '')}"],
-                "answer": [f"{generated_item.get('options', {}).get(generated_item.get('correct_answer', ''), '')}. {generated_item.get('rationale', '')}"],
-                "retrieved_contexts": [raw_contexts or ["No context provided."]],
-                "contexts": [raw_contexts or ["No context provided."]]
-            })
-            
-            current_evaluator = EVALUATOR_LLM
-
-            self.update_state(state='PROCESSING', meta={
-                'step': 'Evaluating Faithfulness', 'attempt': attempt + 1, 'details': 'Running RAGAS hallucination checks...'
-            })
-            
-            eval_f = evaluate(
-                dataset=eval_dataset, metrics=[Faithfulness()], llm=current_evaluator,
-                embeddings=EMBEDDINGS, run_config=RUN_CONFIG, raise_exceptions=True
-            )
-            scores_f = eval_f.to_pandas().iloc[0].to_dict()
-            f_score = float(scores_f.get("faithfulness", 0.0) or 0.0)
-            
-            if math.isnan(f_score):
-                raise ValueError("429/503 API Unavailable or Quota Exceeded during Faithfulness evaluation.")
-                
-            if f_score > best_faithfulness:
-                best_faithfulness = f_score
-                best_item = generated_item.copy()
-                best_item["evaluation_metrics"] = {"faithfulness": round(f_score, 3)}
-                best_item["eval_dataset"] = eval_dataset
-
-            if f_score >= 0.75:
-                self.update_state(state='PROCESSING', meta={
-                    'step': 'Evaluating Relevancy', 'attempt': attempt + 1, 'details': f'Faithfulness passed ({f_score:.2f}). Checking Relevancy...'
-                })
-                eval_s = evaluate(
-                    dataset=eval_dataset, metrics=[ContextRelevance(), AnswerRelevancy(strictness=1)],
-                    llm=current_evaluator, embeddings=EMBEDDINGS, run_config=RUN_CONFIG, raise_exceptions=True
-                )
-                scores_s = eval_s.to_pandas().iloc[0].to_dict()
-                cr_score = float(resolve_context_metric_value(scores_s) or 0.0)
-                ar_score = float(scores_s.get("answer_relevancy", 0.0) or 0.0)
-                
-                if math.isnan(cr_score) or math.isnan(ar_score):
-                    raise ValueError("429/503 API Unavailable or Quota Exceeded during Secondary evaluation.")
-                    
-                generated_item["evaluation_metrics"] = {
-                    "faithfulness": round(f_score, 3), "context_relevance": round(cr_score, 3), "answer_relevancy": round(ar_score, 3)
-                }
-                
-                if cr_score >= 0.70 and ar_score >= 0.70:
-                    generated_item["status"] = "PASSED"
-                    generated_item["calibration_attempts"] = attempt
-                    save_to_supabase(generated_item, exam_session_id)
-                    return generated_item
+            if is_hots:
+                # Prioritize custom_settings (teacher override), else use DB settings (admin control)
+                if custom_settings and isinstance(custom_settings, list) and len(custom_settings) > 0:
+                    subject_pool = custom_settings
                 else:
-                    if cr_score < 0.70: current_final_k = 3
-                    attempt += 1
+                    subject_pool = global_subject_pool
+                
+                # Sample settings safely
+                sampled_settings = random.choices(subject_pool, k=batch_count) if len(subject_pool) < batch_count else random.sample(subject_pool, batch_count)
+                
+                settings_instructions = "\n".join([f"- Item {i+1}: Situate within a '{setting}' context." for i, setting in enumerate(sampled_settings)])
+                prompt_rules = f"""
+COGNITIVE LEVEL INSTRUCTION (HOTS - {target_blooms_level}):
+- Generate realistic, applied organizational, psychometric, or clinical scenarios.
+- Assign each item to a distinct operational context:
+{settings_instructions}
+- Require examinees to diagnose, differentiate, or apply theoretical solutions rather than recall terms.
+"""
             else:
-                current_final_k = 7 
-                attempt += 1
+                prompt_rules = f"""
+COGNITIVE LEVEL INSTRUCTION (LOTS - {target_blooms_level}):
+- DIRECT CONCEPTUAL INQUIRY: Do NOT invent fictional characters, company names, or elaborate narrative scenarios.
+- Test functional distinctions, foundational assumptions, historical models, or taxonomic relationships directly and cleanly.
+"""
 
-        except Exception as e:
-            error_msg = str(e).lower()
-            if any(term in error_msg for term in ["429", "503", "504", "quota", "resourceexhausted", "exhausted", "unavailable", "deadline"]):
-                quota_retry_count += 1
-                if quota_retry_count >= max_quota_retries: break
-                rotate_key(failed_key=active_key)
-                time.sleep(3)
-                continue 
-            else:
-                attempt += 1
+            final_prompt = prompt_header + prompt_rules
 
-    if best_item:
-        metrics = best_item.get("evaluation_metrics", {})
-        if "context_relevance" not in metrics:
+            # --- GENERATION WITH GEMINI ---
             try:
-                current_evaluator = EVALUATOR_LLM
-                eval_final = evaluate(
-                    dataset=best_item["eval_dataset"], metrics=[ContextRelevance(), AnswerRelevancy(strictness=1)],
-                    llm=current_evaluator, embeddings=EMBEDDINGS, run_config=RUN_CONFIG, raise_exceptions=True
-                )
-                scores_fin = eval_final.to_pandas().iloc[0].to_dict()
-                
-                cr_raw = float(resolve_context_metric_value(scores_fin) or 0.0)
-                ar_raw = float(scores_fin.get("answer_relevancy", 0.0) or 0.0)
-                
-                metrics["context_relevance"] = 0.0 if math.isnan(cr_raw) else round(cr_raw, 3)
-                metrics["answer_relevancy"] = 0.0 if math.isnan(ar_raw) else round(ar_raw, 3)
-            except Exception:
-                metrics["context_relevance"] = 0.0
-                metrics["answer_relevancy"] = 0.0
-                
-        best_item.pop("eval_dataset", None)
-        best_item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
-        best_item["calibration_attempts"] = attempt
-        save_to_supabase(best_item, exam_session_id)
-        return best_item
-    else:
-        return {"error": f"Failed generation for: {competency}"}
+                active_key = get_current_key()
+                client = genai.Client(api_key=active_key)
 
+                self.update_state(state='PROCESSING', meta={
+                    'step': 'Generating Batch',
+                    'batch': f"{batch_idx + 1}/{len(sub_batch_counts)}",
+                    'attempt': attempt + 1,
+                    'details': f'Drafting {batch_count} items via gemini-3.5-flash-lite...'
+                })
+
+                response = client.models.generate_content(
+                    model="gemini-3.5-flash-lite",
+                    contents=final_prompt,
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=AssessmentBatchSchema,
+                        temperature=0.35
+                    )
+                )
+
+                if response.usage_metadata:
+                    try:
+                        u = response.usage_metadata
+                        supabase_client.table("Token_Logs").insert({
+                            "task_type": "Exam Generation (Batch)",
+                            "prompt_tokens": u.prompt_token_count,
+                            "completion_tokens": u.candidates_token_count,
+                            "total_tokens": u.total_token_count
+                        }).execute()
+                    except Exception as ex:
+                        print(f"Token log failed: {ex}")
+
+                parsed_batch = json.loads(response.text).get("items", [])
+                if not parsed_batch:
+                    attempt += 1
+                    continue
+
+                # --- RAGAS VIGNETTE BYPASS EVALUATION ---
+                self.update_state(state='PROCESSING', meta={
+                    'step': 'Evaluating Batch Quality',
+                    'batch': f"{batch_idx + 1}/{len(sub_batch_counts)}",
+                    'attempt': attempt + 1,
+                    'details': 'Running RAGAS Faithfulness evaluation with Vignette Bypass...'
+                })
+
+                eval_questions = [f"Concept: {item.get('step_1_core_concept', '')}" for item in parsed_batch]
+                eval_answers = [
+                    f"Selected Option ({item.get('correct_answer')}): {item.get('options', {}).get(item.get('correct_answer'), '')}. "
+                    f"Rationale: {item.get('rationale', '')}"
+                    for item in parsed_batch
+                ]
+                eval_contexts = [raw_contexts] * len(parsed_batch)
+
+                eval_dataset = Dataset.from_dict({
+                    "question": eval_questions,
+                    "user_input": eval_questions,
+                    "answer": eval_answers,
+                    "response": eval_answers,
+                    "contexts": eval_contexts,
+                    "retrieved_contexts": eval_contexts
+                })
+
+                eval_result = evaluate(
+                    dataset=eval_dataset,
+                    metrics=[Faithfulness()],
+                    llm=EVALUATOR_LLM,
+                    embeddings=EMBEDDINGS,
+                    run_config=RUN_CONFIG,
+                    raise_exceptions=True
+                )
+
+                df_scores = eval_result.to_pandas()
+
+                # Process results per item
+                batch_passed = True
+                for idx, raw_item in enumerate(parsed_batch):
+                    f_score = float(df_scores.iloc[idx].get("faithfulness", 0.0) or 0.0)
+                    if math.isnan(f_score):
+                        f_score = 0.0
+
+                    raw_item["question"] = clean_question_stem(raw_item.get("question", ""))
+                    raw_item["subject"] = subject
+                    raw_item["competency"] = competency
+                    raw_item["blooms_level"] = target_blooms_level
+                    raw_item["citations"] = citations
+                    raw_item["calibration_attempts"] = attempt
+                    raw_item["evaluation_metrics"] = {"faithfulness": round(f_score, 3)}
+
+                    if f_score >= 0.70:
+                        raw_item["status"] = "PASSED"
+                    else:
+                        batch_passed = False
+                        raw_item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
+
+                if batch_passed or attempt == MAX_RETRIES:
+                    for raw_item in parsed_batch:
+                        save_to_supabase(raw_item, exam_session_id)
+                        all_processed_items.append(raw_item)
+                    break
+                else:
+                    active_query = rewrite_search_query(subject, competency, active_query)
+                    current_final_k = 10
+                    attempt += 1
+
+            except Exception as e:
+                err_str = str(e).lower()
+                if any(x in err_str for x in ["429", "503", "quota", "resourceexhausted"]):
+                    rotate_key(failed_key=active_key)
+                    time.sleep(3)
+                    continue
+                else:
+                    print(f"[ERROR in batch worker]: {e}")
+                    attempt += 1
+
+    return all_processed_items
+
+# --- 5. WORKFLOW CALLBACKS & HEALTH ---
 @shared_task(bind=True)
 def finalize_exam_session_task(self, results, exam_session_id):
+    """
+    Collects results from all batches, flattens nested lists, and finalizes the exam session.
+    """
     try:
-        supabase_client.table("Exams").update({"global_status": "Pending"}).eq("exam_id", exam_session_id).execute()
-        print(f"\n[SUCCESS] Entire batch finished. UI updated for exam: {exam_session_id}")
-        return {"status": "Complete", "session_id": exam_session_id, "items_generated": len(results)}
+        flattened_items = []
+        for res in results:
+            if isinstance(res, list):
+                flattened_items.extend(res)
+            elif isinstance(res, dict) and "question" in res:
+                flattened_items.append(res)
+
+        supabase_client.table("Exams").update({
+            "global_status": "Pending", 
+            "total_generated": len(flattened_items)
+        }).eq("exam_id", exam_session_id).execute()
+
+        print(f"\n[SUCCESS] Exam session {exam_session_id} finalized with {len(flattened_items)} items.")
+        return {"status": "Complete", "session_id": exam_session_id, "items_count": len(flattened_items)}
     except Exception as e:
-        print(f"\n[CRITICAL ERROR] Finalize callback failed: {str(e)}")
+        print(f"\n[CRITICAL ERROR] Failed to finalize exam session: {e}")
+        return {"status": "Error", "message": str(e)}
 
 @shared_task(bind=True)
 def fail_exam_session_task(self, request, exc, traceback, exam_session_id):
     try:
         supabase_client.table("Exams").update({"global_status": "Failed"}).eq("exam_id", exam_session_id).execute()
-        print(f"\n[CRITICAL ERROR] Exam batch {exam_session_id} failed: {exc}")
-    except Exception as e:
+        print(f"\n[CRITICAL ERROR] Exam session {exam_session_id} failed: {exc}")
+    except Exception:
         pass
 
 @shared_task(bind=True)
@@ -436,4 +530,4 @@ def heartbeat_task(self):
             "last_heartbeat": datetime.now(timezone.utc).isoformat()
         }).execute()
     except Exception as e:
-        print(f"\n[HEARTBEAT ERROR] Failed to ping Supabase: {str(e)}")
+        print(f"\n[HEARTBEAT ERROR] Supabase ping failed: {e}")

@@ -21,7 +21,6 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 # 2. Global Initialization
 print(f"Loading embedding model on {DEVICE}...")
 
-# FIXED: Aligned with BAAI models and normalization for accurate cosine similarity
 embedding_model = HuggingFaceEmbeddings(
     model_name="BAAI/bge-base-en-v1.5", 
     model_kwargs={'trust_remote_code': True, 'device': DEVICE},
@@ -38,15 +37,16 @@ vector_db = SupabaseVectorStore(
 )
 
 print(f"Loading cross-encoder reranker on {DEVICE}...")
+# bge-reranker-v2-m3 can handle sequence lengths up to 8192, which safely accommodates our new 1000-token chunks
 reranker_model = CrossEncoder('BAAI/bge-reranker-v2-m3', device=DEVICE)
 
-def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
+def retrieve_and_rerank(query, top_k=20, final_k=7, reference_filter=["All"]):
     """
     Executes a two-stage retrieval pipeline: dense vector search followed by cross-encoder reranking.
+    Optimized to handle larger, semantically complete chunks.
     """
     print(f"Step 1: Retrieving candidates for query: '{query}'")
     
-    # LangChain's Supabase implementation uses exact JSONB matching. 
     search_filter = {}
     fetch_k = top_k
     
@@ -54,15 +54,15 @@ def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
         search_filter = {"source": reference_filter[0]}
         print(f"        Applying DB-level metadata filter: {search_filter}")
     elif "All" not in reference_filter and len(reference_filter) > 1:
-        # FIXED: Fetch a much larger pool to ensure enough candidates survive the Python-level filter
-        fetch_k = top_k * 4 
+        # UPGRADED: Scaled the fetch multiplier to ensure enough large semantic chunks 
+        # survive the Python-level metadata filter.
+        fetch_k = top_k * 5 
         
     initial_results = vector_db.similarity_search(query, k=fetch_k, filter=search_filter)
     
     # Python-level filtering for multiple textbooks
     if "All" not in reference_filter and len(reference_filter) > 1:
         initial_results = [doc for doc in initial_results if doc.metadata.get("source") in reference_filter]
-        # Trim back down to top_k after filtering
         initial_results = initial_results[:top_k]
     
     if not initial_results:
@@ -71,6 +71,7 @@ def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
         
     print(f"Step 2: Reranking {len(initial_results)} candidates down to top {final_k} chunks...")
     
+    # CrossEncoder pairs the query with our new, larger chunks
     pairs = [[query, doc.page_content] for doc in initial_results]
     scores = reranker_model.predict(pairs)
     
@@ -79,7 +80,8 @@ def retrieve_and_rerank(query, top_k=12, final_k=5, reference_filter=["All"]):
     
     best_chunks = [doc for doc, score in scored_results[:final_k]]
     
-    # FIXED: Clear PyTorch VRAM to prevent Out of Memory crashes during batch generation
+    # CRITICAL: Because our chunks are now up to 1000 tokens, the CrossEncoder will consume significantly
+    # more VRAM during prediction. We must aggressively clear the cache before passing back to Gemini.
     if DEVICE == 'cuda':
         torch.cuda.empty_cache()
         gc.collect()

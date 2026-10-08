@@ -1,6 +1,7 @@
 datasets==5.0.1
 docling==2.126.0
 docling-core>=2.94.1
+google-genai
 langchain_core
 langchain_google_genai
 langchain_huggingface

@@ -20,11 +20,8 @@ load_dotenv()
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
 os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
-# 1. Global Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
-
-# MAKE SURE THIS LINE IS HERE:
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
@@ -32,7 +29,6 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 
 print(f"Connecting to Supabase pgvector at {SUPABASE_URL} for Ingestion Worker...")
 
-# Now the embedding model can successfully read the DEVICE variable
 embedding_model = HuggingFaceEmbeddings(
     model_name="BAAI/bge-base-en-v1.5", 
     model_kwargs={'trust_remote_code': True, 'device': DEVICE},
@@ -48,7 +44,6 @@ vector_db = SupabaseVectorStore(
 )
 
 def process_hybrid_pdf(pdf_bytes, file_name, docling_converter, docling_chunker, text_splitter, indexed_path, tags):
-    # Open the PDF directly from the downloaded memory buffer
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     extracted_documents = []
 
@@ -60,7 +55,6 @@ def process_hybrid_pdf(pdf_bytes, file_name, docling_converter, docling_chunker,
         is_rotated = page.rotation != 0
         block_list = page.get_text("blocks")
         
-        # Base metadata injected into every chunk for exact deletion mapping later
         chunk_metadata = {
             "source": file_name,
             "page": page_num + 1,
@@ -72,7 +66,6 @@ def process_hybrid_pdf(pdf_bytes, file_name, docling_converter, docling_chunker,
             temp_pdf = pymupdf.open()
             temp_pdf.insert_pdf(doc, from_page=page_num, to_page=page_num)
             
-            # Write the single page to a memory buffer instead of the hard drive
             page_bytes = temp_pdf.tobytes()
             temp_pdf.close()
             
@@ -108,17 +101,12 @@ def process_hybrid_pdf(pdf_bytes, file_name, docling_converter, docling_chunker,
 
 @shared_task(bind=True)
 def batch_ingest_task(self, request_id, storage_path, tags):
-    """
-    Downloads a pending PDF from Supabase, chunks it, embeds it into pgvector, 
-    moves the physical file to 'indexed/', and updates the Material Requests table.
-    """
     if not storage_path or not request_id:
         return {"status": "Error", "message": "Missing request_id or storage_path."}
 
     file_name = os.path.basename(storage_path)
     indexed_path = storage_path.replace("pending/", "indexed/")
 
-    # 1. Check if it already exists in the database to prevent duplicates
     self.update_state(state='PROCESSING', meta={'step': 'Checking Database', 'details': f'Verifying {file_name} is not a duplicate...'})
     response = supabase_client.table("Documents") \
         .select("id") \
@@ -131,7 +119,6 @@ def batch_ingest_task(self, request_id, storage_path, tags):
 
     self.update_state(state='PROCESSING', meta={'step': 'Downloading PDF', 'details': f'Fetching {file_name} from pending storage...'})
 
-    # 2. Download the file from Supabase Storage with exponential backoff
     max_retries = 3
     pdf_bytes = None
     
@@ -146,23 +133,28 @@ def batch_ingest_task(self, request_id, storage_path, tags):
 
     self.update_state(state='PROCESSING', meta={'step': 'Extracting Layout', 'details': f'Parsing complex layouts in {file_name}...'})
 
-    # 3. Initialize chunking tools
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_formula_enrichment = True
     docling_converter = DocumentConverter(
         allowed_formats=[InputFormat.PDF],
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
-    docling_chunker = HybridChunker(max_tokens=512, merge_peers=True)
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    
+    # 1. Expanded HybridChunker limit for semantic completeness
+    docling_chunker = HybridChunker(max_tokens=1000, merge_peers=True)
+    
+    # 2. Adjusted character splitter to respect structural boundaries
+    text_splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n", "(?<=\. )", " "],
+        chunk_size=1200, 
+        chunk_overlap=200
+    )
     
     try:
-        # 4. Process the PDF purely in memory (passing the new indexed_path and tags for metadata)
         raw_docs = process_hybrid_pdf(pdf_bytes, file_name, docling_converter, docling_chunker, text_splitter, indexed_path, tags)
 
         self.update_state(state='PROCESSING', meta={'step': 'Embedding', 'details': f'Pushing {len(raw_docs)} chunks to vector database...'})
         
-        # 5. Push to Supabase pgvector in batches
         batch_size = 100 
         total_chunks = len(raw_docs)
         
@@ -171,18 +163,15 @@ def batch_ingest_task(self, request_id, storage_path, tags):
             vector_db.add_documents(batch)
             gc.collect()
 
-        # 6. MIGRATION: Move the physical file to the indexed folder
         self.update_state(state='PROCESSING', meta={'step': 'Finalizing', 'details': f'Moving {file_name} to indexed storage...'})
         supabase_client.storage.from_("textbooks").move(storage_path, indexed_path)
 
-        # 7. UPDATE DATABASE: Sync the new file_path back to the frontend's view
         supabase_client.table("Material Requests").update({
             "file_path": indexed_path,
             "status": "Approved & Indexed"
         }).eq("id", request_id).execute()
 
     except Exception as e:
-        # 8. Database Rollback: If anything crashes, delete all chunks inserted for this file to prevent orphans
         try:
             supabase_client.table("Documents").delete().eq("metadata->>source", file_name).execute()
         except Exception:
