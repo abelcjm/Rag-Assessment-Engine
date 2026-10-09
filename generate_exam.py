@@ -63,36 +63,18 @@ class ItemOptions(BaseModel):
     D: str = Field(description="Option D")
 
 class AssessmentItemSchema(BaseModel):
-    step_1_core_concept: str = Field(
-        description="Isolate the specific mechanism, psychological model, or criteria being tested."
-    )
-    step_2_vignette_design: str = Field(
-        description="Explain how the scenario or conceptual problem will test application without leaking textbook definitions."
-    )
-    question: str = Field(
-        description="The exam question stem. Must strictly adhere to Bloom's guidelines and never leak the definition."
-    )
-    options: ItemOptions = Field(
-        description="Four structurally balanced, homogeneous options (A, B, C, D)."
-    )
-    correct_answer: str = Field(
-        description="The correct option key: must be exactly 'A', 'B', 'C', or 'D'."
-    )
-    rationale: str = Field(
-        description="Textbook-grounded explanation verifying why the correct option is right, citing the source document and page."
-    )
-    distractor_rationales: Dict[str, str] = Field(
-        description="Provide keys for the 3 incorrect options (e.g., 'A', 'B', 'C') explaining why a partially knowledgeable examinee would choose each."
-    )
+    step_1_core_concept: str = Field(description="Isolate the specific mechanism, psychological model, or criteria being tested.")
+    step_2_vignette_design: str = Field(description="Explain how the scenario or conceptual problem will test application without leaking textbook definitions.")
+    question: str = Field(description="The exam question stem. Must strictly adhere to Bloom's guidelines and never leak the definition.")
+    options: ItemOptions = Field(description="Four structurally balanced, homogeneous options (A, B, C, D).")
+    correct_answer: str = Field(description="The correct option key: must be exactly 'A', 'B', 'C', or 'D'.")
+    rationale: str = Field(description="Textbook-grounded explanation verifying why the correct option is right, citing the source document and page.")
+    distractor_rationales: Dict[str, str] = Field(description="Provide keys for the 3 incorrect options (e.g., 'A', 'B', 'C') explaining why a partially knowledgeable examinee would choose each.")
 
 class AssessmentBatchSchema(BaseModel):
-    items: List[AssessmentItemSchema] = Field(
-        description="List of distinct, high-quality assessment items generated for the competency."
-    )
+    items: List[AssessmentItemSchema] = Field(description="List of distinct, high-quality assessment items generated for the competency.")
 
-# --- NEW HELPERS FOR PYDANTIC COMPATIBILITY BUG ---
 def strip_additional_properties(schema: dict) -> dict:
-    """Recursively removes the unsupported 'additionalProperties' key from a Pydantic schema."""
     if isinstance(schema, dict):
         schema.pop("additionalProperties", None)
         for key, list_or_dict in list(schema.items()):
@@ -104,11 +86,9 @@ def strip_additional_properties(schema: dict) -> dict:
 
 # --- 2. TELEMETRY & API CONFIGURATION ---
 class SupabaseTelemetryCallbackHandler(BaseCallbackHandler):
-    """Intercepts LangChain LLM calls from RAGAS to log token usage."""
     def on_llm_end(self, response: LLMResult, **kwargs) -> None:
         try:
             prompt_tokens, completion_tokens, total_tokens = 0, 0, 0
-            
             if response.llm_output and "token_usage" in response.llm_output:
                 usage = response.llm_output["token_usage"]
                 prompt_tokens = usage.get("prompt_tokens", 0)
@@ -122,7 +102,6 @@ class SupabaseTelemetryCallbackHandler(BaseCallbackHandler):
                         prompt_tokens = usage.get("input_tokens", usage.get("prompt_token_count", 0))
                         completion_tokens = usage.get("output_tokens", usage.get("candidates_token_count", 0))
                         total_tokens = usage.get("total_tokens", usage.get("total_token_count", 0))
-            
             if total_tokens > 0:
                 supabase_client.table("Token_Logs").insert({
                     "task_type": "Item Evaluation",
@@ -161,14 +140,14 @@ def rotate_key(failed_key=None):
         
         EVALUATOR_LLM = ChatGoogleGenerativeAI(
             model="gemini-3.1-flash-lite", temperature=0.0,
-            google_api_key=new_key, candidate_count=1, max_retries=2, timeout=60,
+            google_api_key=new_key, max_retries=2, timeout=60,
             callbacks=[TELEMETRY_HANDLER]
         )
         return new_key
 
 EVALUATOR_LLM = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite", temperature=0.0,
-    google_api_key=get_current_key(), candidate_count=1, max_retries=2, timeout=60,
+    google_api_key=get_current_key(), max_retries=2, timeout=60,
     callbacks=[TELEMETRY_HANDLER]
 )
 
@@ -178,11 +157,42 @@ EMBEDDINGS = HuggingFaceEmbeddings(
     encode_kwargs={'normalize_embeddings': True}
 )
 
-RUN_CONFIG = RunConfig(max_workers=4)
+RUN_CONFIG = RunConfig(max_workers=1)
 
 # --- 3. UTILITY FUNCTIONS ---
+def safe_evaluate(dataset, metrics, raise_exceptions=True):
+    max_rotations = len(API_KEYS)
+    rotations = 0
+    
+    while rotations <= max_rotations:
+        try:
+            result = evaluate(
+                dataset=dataset,
+                metrics=metrics,
+                llm=EVALUATOR_LLM,
+                embeddings=EMBEDDINGS,
+                run_config=RUN_CONFIG,
+                raise_exceptions=True
+            )
+            df = result.to_pandas()
+            if df.isnull().values.any():
+                raise Exception("429 Quota Exceeded (NaN detected)")
+            return result
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(x in err_str for x in ["429", "quota", "resource", "nan"]):
+                rotate_key()
+                rotations += 1
+                time.sleep(3)
+            else:
+                if raise_exceptions:
+                    raise e
+                else:
+                    return None
+    print("[!] Failed to evaluate: Exhausted all API keys in rotation.")
+    return None
+
 def get_domain_settings(subject: str) -> list:
-    """Fetches the global vignette settings for a specific subject from the normalized Supabase table."""
     try:
         response = supabase_client.table("Domain_Settings").select("setting_name").eq("subject", subject).execute()
         if response.data:
@@ -191,8 +201,6 @@ def get_domain_settings(subject: str) -> list:
                 return pool
     except Exception as e:
         print(f"[DB-WARNING] Failed to fetch Domain_Settings for {subject}: {e}")
-    
-    # Safe fallback if DB fetch fails or no rows exist for the subject
     return ["General workplace", "Academic setting", "Clinical setting", "Everyday social interaction"]
 
 def clean_question_stem(stem: str) -> str:
@@ -206,7 +214,6 @@ def clean_question_stem(stem: str) -> str:
     cleaned = stem.strip()
     for pattern in patterns:
         cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
-    
     if cleaned and cleaned[0].islower():
         cleaned = cleaned[0].upper() + cleaned[1:]
     return cleaned.strip()
@@ -226,7 +233,6 @@ def build_domain_query(subject: str, competency: str) -> str:
     return f"{subject} {competency} {terms}"
 
 def rewrite_search_query(subject: str, competency: str, failed_query: str) -> str:
-    """Invokes Gemini to semantically rewrite the query when context relevance is low."""
     try:
         client = genai.Client(api_key=get_current_key())
         rewrite_prompt = (
@@ -265,7 +271,7 @@ def save_to_supabase(item: dict, session_id: str):
             "citations": item.get("citations", []),
             "evaluation_metrics": item.get("evaluation_metrics", {}),
             "status": item.get("status", "PASSED"),
-            "calibration_attempts": item.get("calibration_attempts", 0)
+            "calibration_attempts": item.get("calibration_attempts", 1)
         }
         response = supabase_client.table("Mock Exam Items").insert(payload).execute()
         if response.data:
@@ -278,11 +284,6 @@ def save_to_supabase(item: dict, session_id: str):
 def generate_assessment_batch_task(self, subject: str, competency: str, target_blooms_level: str,
                                    items_to_generate: int, selected_references: list, exam_session_id: str,
                                    custom_settings: list = None):
-    """
-    Batches question generation according to the Table of Specifications.
-    Splits requests exceeding MAX_BATCH_SIZE (4) into consecutive sub-batches.
-    Supports injecting a custom_settings array to override the global Domain_Settings table.
-    """
     MAX_BATCH_SIZE = 4
     sub_batch_counts = []
     remaining = items_to_generate
@@ -293,13 +294,11 @@ def generate_assessment_batch_task(self, subject: str, competency: str, target_b
 
     all_processed_items = []
     base_query = build_domain_query(subject, competency)
-    
-    # Fetch global subject settings from Supabase (runs once per batch group)
     global_subject_pool = get_domain_settings(subject)
 
-    # NEW: Fetch and clean schema outside the loop
     raw_schema = AssessmentBatchSchema.model_json_schema()
     clean_schema = strip_additional_properties(raw_schema)
+    absolute_words_pattern = re.compile(r'\b(always|never|completely|exclusively|entirely|absolutely|invariably|permanently|strictly|solely|purely|totally)\b', re.IGNORECASE)
 
     for batch_idx, batch_count in enumerate(sub_batch_counts):
         attempt = 0
@@ -334,8 +333,6 @@ def generate_assessment_batch_task(self, subject: str, competency: str, target_b
                 formatted_chunks.append(f"--- SOURCE: {s_name} (Page {p_num}) ---\n{body}\n--- END ---")
 
             context_block = "\n\n".join(formatted_chunks)
-
-            # --- BLOOM'S BRANCHING PROMPT CONSTRUCTION ---
             is_hots = target_blooms_level.lower() in ["applying", "analyzing", "evaluating", "creating"]
             
             prompt_header = f"""You are a licensed Psychometrician and assessment specialist designing formal multiple-choice items for the Philippine Psychometrician Licensure Examination (BLEPP).
@@ -351,23 +348,22 @@ TEXTBOOK EXCERPTS:
 </context>
 
 STRICT PSYCHOMETRIC PRINCIPLES:
-1. NO DEFINITION LEAKING: The scenario stem must describe a concrete behavior, structural condition, or practical problem. NEVER state the verbatim textbook definition or include dead-giveaway terminology in the stem.
-2. DISTRACTOR HOMOGENEITY: All 4 options (A, B, C, D) must belong to the exact same conceptual taxonomy or level of abstraction. Keep options uniform in length, grammatical structure, and syntax.
-3. THE COVER TEST: A prepared examinee must not be able to guess the answer by looking at the options alone without analyzing the stem, nor should the answer stand out through superficial cues.
-4. CHAIN-OF-THOUGHT MANDATE: You must complete 'step_1_core_concept', 'step_2_vignette_design', and 'distractor_rationales' for every item.
+1. STEM LENGTH & SYNTAX: Question stems must strictly be 2 to 4 lines maximum (under 60 words). Vary the opening syntax (do not start every item with "A manager at...").
+2. SUFFICIENT CONTEXT ONLY: Provide only the essential behavioral or structural problem. NEVER over-explain the scenario to the point that it gives away the answer. The examinee must infer the theory, not match keywords.
+3. DISTRACTOR HOMOGENEITY: All 4 options (A, B, C, D) must belong to the exact same conceptual taxonomy and have uniform length and grammatical structure.
+4. NO ABSOLUTE MODIFIERS: Never use words such as 'completely', 'always', 'never', 'exclusively', 'invariably', 'solely', or 'entirely' in distractors.
+5. CHAIN-OF-THOUGHT MANDATE: Fill step_1_core_concept, step_2_vignette_design, and distractor_rationales for every item.
 """
 
             if is_hots:
-                # Prioritize custom_settings (teacher override), else use DB settings (admin control)
                 if custom_settings and isinstance(custom_settings, list) and len(custom_settings) > 0:
                     subject_pool = custom_settings
                 else:
                     subject_pool = global_subject_pool
                 
-                # Sample settings safely
                 sampled_settings = random.choices(subject_pool, k=batch_count) if len(subject_pool) < batch_count else random.sample(subject_pool, batch_count)
-                
                 settings_instructions = "\n".join([f"- Item {i+1}: Situate within a '{setting}' context." for i, setting in enumerate(sampled_settings)])
+                
                 prompt_rules = f"""
 COGNITIVE LEVEL INSTRUCTION (HOTS - {target_blooms_level}):
 - Generate realistic, applied organizational, psychometric, or clinical scenarios.
@@ -384,7 +380,6 @@ COGNITIVE LEVEL INSTRUCTION (LOTS - {target_blooms_level}):
 
             final_prompt = prompt_header + prompt_rules
 
-            # --- GENERATION WITH GEMINI ---
             try:
                 active_key = get_current_key()
                 client = genai.Client(api_key=active_key)
@@ -401,34 +396,58 @@ COGNITIVE LEVEL INSTRUCTION (LOTS - {target_blooms_level}):
                     contents=final_prompt,
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=clean_schema, # UPDATED: Use cleaned schema dict here
+                        response_schema=clean_schema,
                         temperature=0.35
                     )
                 )
-
-                if response.usage_metadata:
-                    try:
-                        u = response.usage_metadata
-                        supabase_client.table("Token_Logs").insert({
-                            "task_type": "Exam Generation (Batch)",
-                            "prompt_tokens": u.prompt_token_count,
-                            "completion_tokens": u.candidates_token_count,
-                            "total_tokens": u.total_token_count
-                        }).execute()
-                    except Exception as ex:
-                        print(f"Token log failed: {ex}")
 
                 parsed_batch = json.loads(response.text).get("items", [])
                 if not parsed_batch:
                     attempt += 1
                     continue
+                
+                # --- FAILSAFE VALIDATION BLOCK ---
+                batch_isValid = True
+                for item in parsed_batch:
+                    stem_words = item.get("question", "").split()
+                    correct_key = item.get("correct_answer", "")
+                    options = item.get("options", {})
+                    
+                    if len(stem_words) > 65:
+                        print(f"[Validation Failed] Stem too long ({len(stem_words)} words).")
+                        if attempt < MAX_RETRIES:
+                            batch_isValid = False
+                            break
+                        else:
+                            item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
+                            item.setdefault("evaluation_metrics", {})["regex_warning"] = "Stem exceeds word limit"
 
-                # --- RAGAS VIGNETTE BYPASS EVALUATION ---
+                    for key, text in options.items():
+                        if key != correct_key and isinstance(text, str):
+                            if absolute_words_pattern.search(text):
+                                print(f"[Validation Failed] Absolute word found in distractor {key}.")
+                                if attempt < MAX_RETRIES:
+                                    batch_isValid = False
+                                    break
+                                else:
+                                    item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
+                                    item.setdefault("evaluation_metrics", {})["regex_warning"] = "Absolute word detected in distractor"
+                    
+                    if not batch_isValid:
+                        break
+
+                if not batch_isValid:
+                    print(f"[Retry] Validation failed. Rewriting query...")
+                    active_query = rewrite_search_query(subject, competency, active_query)
+                    attempt += 1
+                    continue
+                # --- END FAILSAFE VALIDATION BLOCK ---
+
                 self.update_state(state='PROCESSING', meta={
-                    'step': 'Evaluating Batch Quality',
+                    'step': 'Evaluating Batch Faithfulness',
                     'batch': f"{batch_idx + 1}/{len(sub_batch_counts)}",
                     'attempt': attempt + 1,
-                    'details': 'Running RAGAS Faithfulness evaluation with Vignette Bypass...'
+                    'details': 'Running primary RAGAS Faithfulness check...'
                 })
 
                 eval_questions = [f"Concept: {item.get('step_1_core_concept', '')}" for item in parsed_batch]
@@ -448,19 +467,14 @@ COGNITIVE LEVEL INSTRUCTION (LOTS - {target_blooms_level}):
                     "retrieved_contexts": eval_contexts
                 })
 
-                eval_result = evaluate(
-                    dataset=eval_dataset,
-                    metrics=[Faithfulness()],
-                    llm=EVALUATOR_LLM,
-                    embeddings=EMBEDDINGS,
-                    run_config=RUN_CONFIG,
-                    raise_exceptions=True
-                )
+                eval_result = safe_evaluate(dataset=eval_dataset, metrics=[Faithfulness()], raise_exceptions=True)
+                if not eval_result:
+                    attempt += 1
+                    continue
 
                 df_scores = eval_result.to_pandas()
-
-                # Process results per item
                 batch_passed = True
+
                 for idx, raw_item in enumerate(parsed_batch):
                     f_score = float(df_scores.iloc[idx].get("faithfulness", 0.0) or 0.0)
                     if math.isnan(f_score):
@@ -471,16 +485,44 @@ COGNITIVE LEVEL INSTRUCTION (LOTS - {target_blooms_level}):
                     raw_item["competency"] = competency
                     raw_item["blooms_level"] = target_blooms_level
                     raw_item["citations"] = citations
-                    raw_item["calibration_attempts"] = attempt
-                    raw_item["evaluation_metrics"] = {"faithfulness": round(f_score, 3)}
+                    raw_item["calibration_attempts"] = attempt + 1
+                    
+                    if "evaluation_metrics" not in raw_item:
+                        raw_item["evaluation_metrics"] = {}
+                    raw_item["evaluation_metrics"]["faithfulness"] = round(f_score, 3)
 
-                    if f_score >= 0.70:
+                    # Only assign PASSED if it hasn't been flagged by Regex earlier
+                    if f_score >= 0.70 and raw_item.get("status") != "FLAGGED_FOR_MANUAL_REVIEW":
                         raw_item["status"] = "PASSED"
-                    else:
+                    elif f_score < 0.70:
                         batch_passed = False
                         raw_item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
 
                 if batch_passed or attempt == MAX_RETRIES:
+                    self.update_state(state='PROCESSING', meta={
+                        'step': 'Secondary RAGAS Metrics',
+                        'batch': f"{batch_idx + 1}/{len(sub_batch_counts)}",
+                        'attempt': attempt + 1,
+                        'details': 'Running Context Relevance & Answer Relevancy...'
+                    })
+                    
+                    extra_eval = safe_evaluate(dataset=eval_dataset, metrics=[AnswerRelevancy(strictness=1), ContextRelevance()], raise_exceptions=False)
+                    
+                    if extra_eval:
+                        df_extra = extra_eval.to_pandas()
+                        ar_col = next((c for c in df_extra.columns if 'answer_relevan' in c), "answer_relevancy")
+                        cr_col = next((c for c in df_extra.columns if 'context_relevan' in c), "context_relevance")
+                        
+                        for idx, raw_item in enumerate(parsed_batch):
+                            ar_score = float(df_extra.iloc[idx].get(ar_col, 0.0) or 0.0)
+                            cr_score = float(df_extra.iloc[idx].get(cr_col, 0.0) or 0.0)
+                            
+                            if math.isnan(ar_score): ar_score = 0.0
+                            if math.isnan(cr_score): cr_score = 0.0
+                            
+                            raw_item["evaluation_metrics"]["answer_relevancy"] = round(ar_score, 3)
+                            raw_item["evaluation_metrics"]["context_relevance"] = round(cr_score, 3)
+
                     for raw_item in parsed_batch:
                         save_to_supabase(raw_item, exam_session_id)
                         all_processed_items.append(raw_item)
@@ -505,9 +547,6 @@ COGNITIVE LEVEL INSTRUCTION (LOTS - {target_blooms_level}):
 # --- 5. WORKFLOW CALLBACKS & HEALTH ---
 @shared_task(bind=True)
 def finalize_exam_session_task(self, results, exam_session_id):
-    """
-    Collects results from all batches, flattens nested lists, and finalizes the exam session.
-    """
     try:
         flattened_items = []
         for res in results:

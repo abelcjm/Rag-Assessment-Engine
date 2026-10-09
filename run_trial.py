@@ -27,7 +27,12 @@ from retrieve_and_rerank import retrieve_and_rerank
 from datasets import Dataset
 
 from ragas import evaluate
-from ragas.metrics import Faithfulness
+from ragas.metrics import Faithfulness, AnswerRelevancy
+try:
+    from ragas.metrics import ContextRelevance
+except ImportError:
+    from ragas.metrics import ContextRelevancy as ContextRelevance
+
 from ragas.run_config import RunConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -45,14 +50,32 @@ API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 if not API_KEYS:
     raise ValueError("CRITICAL: No Gemini API keys found in .env!")
 
-PRIMARY_KEY = API_KEYS[0]
+# Track active key index for rotation
+current_key_idx = 0
+
+def get_active_key():
+    return API_KEYS[current_key_idx]
+
+def rotate_eval_key():
+    global EVALUATOR_LLM, current_key_idx
+    current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+    new_key = API_KEYS[current_key_idx]
+    print(f"\n[!] Rate Limit Exceeded. Swapping to API Key {current_key_idx + 1}/{len(API_KEYS)}...")
+    
+    EVALUATOR_LLM = ChatGoogleGenerativeAI(
+        model="gemini-3.1-flash-lite",
+        temperature=0.0,
+        google_api_key=new_key,
+        max_retries=2,
+        timeout=60
+    )
+    return new_key
 
 # --- RAGAS Evaluator Setup ---
 EVALUATOR_LLM = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite",
     temperature=0.0,
-    google_api_key=PRIMARY_KEY,
-    candidate_count=1,
+    google_api_key=get_active_key(),
     max_retries=2,
     timeout=60
 )
@@ -63,7 +86,7 @@ EMBEDDINGS = HuggingFaceEmbeddings(
     encode_kwargs={'normalize_embeddings': True}
 )
 
-RUN_CONFIG = RunConfig(max_workers=4)
+RUN_CONFIG = RunConfig(max_workers=1) 
 
 # --- Pydantic Schemas for Generation ---
 class ItemOptions(BaseModel):
@@ -86,7 +109,6 @@ class AssessmentBatchSchema(BaseModel):
 
 # --- Helpers ---
 def strip_additional_properties(schema: dict) -> dict:
-    """Recursively removes the unsupported 'additionalProperties' key from a Pydantic schema."""
     if isinstance(schema, dict):
         schema.pop("additionalProperties", None)
         for key, list_or_dict in list(schema.items()):
@@ -138,7 +160,7 @@ def get_domain_settings(subject: str) -> list:
 
 def rewrite_search_query(subject: str, competency: str, failed_query: str) -> str:
     try:
-        client = genai.Client(api_key=PRIMARY_KEY)
+        client = genai.Client(api_key=get_active_key())
         res = client.models.generate_content(
             model="gemini-3.5-flash-lite",
             contents=f"Generate a concise, alternate search query with synonyms and theorists for vector search. Subject: {subject}. Competency: {competency}. Previous: {failed_query}. Output ONLY the query string.",
@@ -148,6 +170,38 @@ def rewrite_search_query(subject: str, competency: str, failed_query: str) -> st
     except Exception:
         return f"{subject} {competency} core concepts principles"
 
+def safe_evaluate(dataset, metrics, raise_exceptions=True):
+    max_rotations = len(API_KEYS)
+    rotations = 0
+    
+    while rotations <= max_rotations:
+        try:
+            result = evaluate(
+                dataset=dataset,
+                metrics=metrics,
+                llm=EVALUATOR_LLM,
+                embeddings=EMBEDDINGS,
+                run_config=RUN_CONFIG,
+                raise_exceptions=True 
+            )
+            df = result.to_pandas()
+            if df.isnull().values.any():
+                raise Exception("429 Quota Exceeded (NaN detected)")
+            return result
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(x in err_str for x in ["429", "quota", "resource", "nan"]):
+                rotate_eval_key()
+                rotations += 1
+                time.sleep(3)
+            else:
+                if raise_exceptions:
+                    raise e
+                else:
+                    return None
+    print("[!] Failed to evaluate: Exhausted all API keys.")
+    return None
+
 def run_single_batch(subject: str, competency: str, target_blooms: str, items_to_generate: int, selected_references: list):
     base_query = build_domain_query(subject, competency)
     active_query = base_query
@@ -156,9 +210,9 @@ def run_single_batch(subject: str, competency: str, target_blooms: str, items_to
     current_final_k = 7
     domain_settings = get_domain_settings(subject)
 
-    # Extract and clean schema outside the loop
     raw_schema = AssessmentBatchSchema.model_json_schema()
     clean_schema = strip_additional_properties(raw_schema)
+    absolute_words_pattern = re.compile(r'\b(always|never|completely|exclusively|entirely|absolutely|invariably|permanently|strictly|solely|purely|totally)\b', re.IGNORECASE)
 
     while attempt <= max_retries:
         print(f"\n[Retrieval] Attempt {attempt + 1}: Querying vector DB...")
@@ -171,7 +225,7 @@ def run_single_batch(subject: str, competency: str, target_blooms: str, items_to
             active_query = rewrite_search_query(subject, competency, active_query)
             attempt += 1
             continue
-
+        
         formatted_chunks, citations, raw_contexts = [], [], []
         for chunk in retrieved_chunks:
             s_name = chunk.metadata.get("source", "Unknown Document")
@@ -197,10 +251,11 @@ TEXTBOOK EXCERPTS:
 </context>
 
 STRICT PSYCHOMETRIC PRINCIPLES:
-1. NO DEFINITION LEAKING: Never state the verbatim textbook definition or dead-giveaways in the stem.
-2. DISTRACTOR HOMOGENEITY: All 4 options (A, B, C, D) must belong to the exact same conceptual taxonomy and have uniform length and grammatical structure.
-3. THE COVER TEST: An examinee cannot guess the answer by looking at the options alone without analyzing the stem.
-4. CHAIN-OF-THOUGHT MANDATE: Fill step_1_core_concept, step_2_vignette_design, and distractor_rationales for every item.
+1. STEM LENGTH & SYNTAX: Question stems must strictly be 2 to 4 lines maximum (under 60 words). Vary the opening syntax (do not start every item with "A manager at...").
+2. SUFFICIENT CONTEXT ONLY: Provide only the essential behavioral or structural problem. NEVER over-explain the scenario to the point that it gives away the answer. The examinee must infer the theory, not match keywords.
+3. DISTRACTOR HOMOGENEITY: All 4 options (A, B, C, D) must belong to the exact same conceptual taxonomy and have uniform length and grammatical structure.
+4. NO ABSOLUTE MODIFIERS: Never use words such as 'completely', 'always', 'never', 'exclusively', 'invariably', 'solely', or 'entirely' in distractors.
+5. CHAIN-OF-THOUGHT MANDATE: Fill step_1_core_concept, step_2_vignette_design, and distractor_rationales for every item.
 """
 
         if is_hots:
@@ -212,88 +267,153 @@ STRICT PSYCHOMETRIC PRINCIPLES:
 
         final_prompt = prompt_header + prompt_rules
 
-        print(f"[Generation] Calling gemini-3.5-flash-lite for {items_to_generate} items...")
-        client = genai.Client(api_key=PRIMARY_KEY)
-        response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
-            contents=final_prompt,
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=clean_schema, # Using the cleaned dictionary
-                temperature=0.35
+        try:
+            print(f"[Generation] Calling gemini-3.5-flash-lite for {items_to_generate} items...")
+            client = genai.Client(api_key=get_active_key())
+            response = client.models.generate_content(
+                model="gemini-3.5-flash-lite",
+                contents=final_prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=clean_schema, 
+                    temperature=0.35
+                )
             )
-        )
 
-        parsed_batch = json.loads(response.text).get("items", [])
-        if not parsed_batch:
-            attempt += 1
-            continue
+            parsed_batch = json.loads(response.text).get("items", [])
+            if not parsed_batch:
+                attempt += 1
+                continue
 
-        print(f"[Evaluation] Running RAGAS Faithfulness evaluation with Vignette Bypass...")
-        eval_questions = [f"Concept: {item.get('step_1_core_concept', '')}" for item in parsed_batch]
-        eval_answers = [
-            f"Selected Option ({item.get('correct_answer')}): {item.get('options', {}).get(item.get('correct_answer'), '')}. Rationale: {item.get('rationale', '')}"
-            for item in parsed_batch
-        ]
-        eval_contexts = [raw_contexts] * len(parsed_batch)
+            # --- FAILSAFE VALIDATION BLOCK ---
+            batch_isValid = True
+            for item in parsed_batch:
+                stem_words = item.get("question", "").split()
+                correct_key = item.get("correct_answer", "")
+                options = item.get("options", {})
+                
+                if len(stem_words) > 65:
+                    print(f"[Validation Failed] Stem too long ({len(stem_words)} words).")
+                    if attempt < max_retries:
+                        batch_isValid = False
+                        break
+                    else:
+                        item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
+                        item.setdefault("evaluation_metrics", {})["regex_warning"] = "Stem exceeds word limit"
 
-        eval_dataset = Dataset.from_dict({
-            "question": eval_questions,
-            "user_input": eval_questions,
-            "answer": eval_answers,
-            "response": eval_answers,
-            "contexts": eval_contexts,
-            "retrieved_contexts": eval_contexts
-        })
+                for key, text in options.items():
+                    if key != correct_key and isinstance(text, str):
+                        if absolute_words_pattern.search(text):
+                            print(f"[Validation Failed] Absolute word found in distractor {key}.")
+                            if attempt < max_retries:
+                                batch_isValid = False
+                                break
+                            else:
+                                item["status"] = "FLAGGED_FOR_MANUAL_REVIEW"
+                                item.setdefault("evaluation_metrics", {})["regex_warning"] = "Absolute word detected in distractor"
+                
+                if not batch_isValid:
+                    break
 
-        eval_result = evaluate(
-            dataset=eval_dataset,
-            metrics=[Faithfulness()],
-            llm=EVALUATOR_LLM,
-            embeddings=EMBEDDINGS,
-            run_config=RUN_CONFIG,
-            raise_exceptions=True
-        )
+            if not batch_isValid:
+                print(f"[Retry] Validation failed. Rewriting query...")
+                active_query = rewrite_search_query(subject, competency, active_query)
+                attempt += 1
+                continue
+            # --- END FAILSAFE VALIDATION BLOCK ---
 
-        df_scores = eval_result.to_pandas()
-        batch_passed = True
-        output_items = []
+            print(f"[Evaluation] Running Primary RAGAS Faithfulness check...")
+            eval_questions = [f"Concept: {item.get('step_1_core_concept', '')}" for item in parsed_batch]
+            eval_answers = [
+                f"Selected Option ({item.get('correct_answer')}): {item.get('options', {}).get(item.get('correct_answer'), '')}. Rationale: {item.get('rationale', '')}"
+                for item in parsed_batch
+            ]
+            eval_contexts = [raw_contexts] * len(parsed_batch)
 
-        for idx, item in enumerate(parsed_batch):
-            f_score = float(df_scores.iloc[idx].get("faithfulness", 0.0) or 0.0)
-            if math.isnan(f_score):
-                f_score = 0.0
+            eval_dataset = Dataset.from_dict({
+                "question": eval_questions,
+                "user_input": eval_questions,
+                "answer": eval_answers,
+                "response": eval_answers,
+                "contexts": eval_contexts,
+                "retrieved_contexts": eval_contexts
+            })
 
-            status = "PASSED" if f_score >= 0.70 else "FLAGGED_FOR_MANUAL_REVIEW"
-            if status == "FLAGGED_FOR_MANUAL_REVIEW":
-                batch_passed = False
+            eval_result = safe_evaluate(dataset=eval_dataset, metrics=[Faithfulness()], raise_exceptions=True)
+            if not eval_result:
+                attempt += 1
+                continue
 
-            # Format strictly matching the target JSON structure (stripping CoT keys)
-            clean_item = {
-                "subject": subject,
-                "competency": competency,
-                "blooms_level": target_blooms,
-                "question": clean_question_stem(item.get("question", "")),
-                "options": item.get("options", {}),
-                "correct_answer": item.get("correct_answer", ""),
-                "rationale": item.get("rationale", ""),
-                "citations": citations,
-                "retrieved_contexts": raw_contexts,
-                "evaluation_metrics": {
-                    "faithfulness": round(f_score, 3)
-                },
-                "status": status,
-                "calibration_attempts": attempt
-            }
-            output_items.append(clean_item)
+            df_scores = eval_result.to_pandas()
+            batch_passed = True
+            output_items = []
 
-        if batch_passed or attempt == max_retries:
-            return output_items
-        else:
-            print(f"[Retry] Batch below threshold. Rewriting search query...")
-            active_query = rewrite_search_query(subject, competency, active_query)
-            current_final_k = 10
-            attempt += 1
+            for idx, item in enumerate(parsed_batch):
+                f_score = float(df_scores.iloc[idx].get("faithfulness", 0.0) or 0.0)
+                if math.isnan(f_score):
+                    f_score = 0.0
+
+                # Only mark as PASSED if it wasn't flagged by the regex failsafe
+                if f_score >= 0.70 and item.get("status") != "FLAGGED_FOR_MANUAL_REVIEW":
+                    status = "PASSED"
+                else:
+                    status = "FLAGGED_FOR_MANUAL_REVIEW"
+                    if f_score < 0.70:
+                        batch_passed = False
+
+                metrics = item.get("evaluation_metrics", {})
+                metrics["faithfulness"] = round(f_score, 3)
+
+                clean_item = {
+                    "subject": subject,
+                    "competency": competency,
+                    "blooms_level": target_blooms,
+                    "question": clean_question_stem(item.get("question", "")),
+                    "options": item.get("options", {}),
+                    "correct_answer": item.get("correct_answer", ""),
+                    "rationale": item.get("rationale", ""),
+                    "citations": citations,
+                    "retrieved_contexts": raw_contexts,
+                    "evaluation_metrics": metrics,
+                    "status": status,
+                    "calibration_attempts": attempt + 1
+                }
+                output_items.append(clean_item)
+
+            if batch_passed or attempt == max_retries:
+                print(f"[Evaluation] Batch completed. Running secondary metrics: Answer Relevancy & Context Relevance...")
+                extra_eval = safe_evaluate(dataset=eval_dataset, metrics=[AnswerRelevancy(strictness=1), ContextRelevance()], raise_exceptions=False)
+                
+                if extra_eval:
+                    df_extra = extra_eval.to_pandas()
+                    ar_col = next((c for c in df_extra.columns if 'answer_relevan' in c), "answer_relevancy")
+                    cr_col = next((c for c in df_extra.columns if 'context_relevan' in c), "context_relevance")
+
+                    for idx, clean_item in enumerate(output_items):
+                        ar_score = float(df_extra.iloc[idx].get(ar_col, 0.0) or 0.0)
+                        cr_score = float(df_extra.iloc[idx].get(cr_col, 0.0) or 0.0)
+                        if math.isnan(ar_score): ar_score = 0.0
+                        if math.isnan(cr_score): cr_score = 0.0
+                        
+                        clean_item["evaluation_metrics"]["answer_relevancy"] = round(ar_score, 3)
+                        clean_item["evaluation_metrics"]["context_relevance"] = round(cr_score, 3)
+
+                return output_items
+            else:
+                print(f"[Retry] Batch below threshold. Rewriting search query...")
+                active_query = rewrite_search_query(subject, competency, active_query)
+                current_final_k = 10
+                attempt += 1
+
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(x in err_str for x in ["429", "quota", "resourceexhausted"]):
+                rotate_eval_key()
+                time.sleep(3)
+                continue
+            else:
+                print(f"[ERROR] Generation failed: {e}")
+                attempt += 1
 
     return output_items
 
