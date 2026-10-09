@@ -27,8 +27,6 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
     raise ValueError("CRITICAL: Supabase URL or Key is missing from environment variables.")
 
-print(f"Connecting to Supabase pgvector at {SUPABASE_URL} for Ingestion Worker...")
-
 embedding_model = HuggingFaceEmbeddings(
     model_name="BAAI/bge-base-en-v1.5", 
     model_kwargs={'trust_remote_code': True, 'device': DEVICE},
@@ -102,20 +100,32 @@ def process_hybrid_pdf(pdf_bytes, file_name, docling_converter, docling_chunker,
 @shared_task(bind=True)
 def batch_ingest_task(self, request_id, storage_path, tags):
     if not storage_path or not request_id:
-        return {"status": "Error", "message": "Missing request_id or storage_path."}
+        raise ValueError("Missing request_id or storage_path.")
 
     file_name = os.path.basename(storage_path)
     indexed_path = storage_path.replace("pending/", "indexed/")
 
-    self.update_state(state='PROCESSING', meta={'step': 'Checking Database', 'details': f'Verifying {file_name} is not a duplicate...'})
+    self.update_state(state='PROCESSING', meta={'step': 'Checking Database', 'details': f'Verifying {file_name} status...'})
     response = supabase_client.table("Documents") \
         .select("id") \
         .contains("metadata", {"source": file_name}) \
         .limit(1) \
         .execute()
                 
+    # FIX 1: If already in database, ensure Material Requests is marked Approved & Indexed
     if response.data:
-        return {"status": "Skipped", "message": f"{file_name} is already in the database."}
+        try:
+            if storage_path.startswith("pending/"):
+                supabase_client.storage.from_("textbooks").move(storage_path, indexed_path)
+        except Exception:
+            pass
+
+        supabase_client.table("Material Requests").update({
+            "file_path": indexed_path,
+            "status": "Approved & Indexed"
+        }).eq("id", request_id).execute()
+
+        return {"status": "Success", "message": f"{file_name} is already indexed. Status verified."}
 
     self.update_state(state='PROCESSING', meta={'step': 'Downloading PDF', 'details': f'Fetching {file_name} from pending storage...'})
 
@@ -128,7 +138,12 @@ def batch_ingest_task(self, request_id, storage_path, tags):
             break
         except Exception as e:
             if attempt == max_retries - 1:
-                return {"status": "FAILURE", "message": f"Download failed after {max_retries} attempts: {e}"}
+                # Mark failed in DB
+                supabase_client.table("Material Requests").update({
+                    "status": "Rejected",
+                    "reject_reason": f"Storage download failed: {str(e)}"
+                }).eq("id", request_id).execute()
+                raise RuntimeError(f"Download failed after {max_retries} attempts: {e}")
             time.sleep(2 ** attempt)
 
     self.update_state(state='PROCESSING', meta={'step': 'Extracting Layout', 'details': f'Parsing complex layouts in {file_name}...'})
@@ -140,10 +155,7 @@ def batch_ingest_task(self, request_id, storage_path, tags):
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
     
-    # 1. Expanded HybridChunker limit for semantic completeness
     docling_chunker = HybridChunker(max_tokens=1000, merge_peers=True)
-    
-    # 2. Adjusted character splitter to respect structural boundaries
     text_splitter = RecursiveCharacterTextSplitter(
         separators=["\n\n", "\n", "(?<=\. )", " "],
         chunk_size=1200, 
@@ -163,20 +175,38 @@ def batch_ingest_task(self, request_id, storage_path, tags):
             vector_db.add_documents(batch)
             gc.collect()
 
-        self.update_state(state='PROCESSING', meta={'step': 'Finalizing', 'details': f'Moving {file_name} to indexed storage...'})
-        supabase_client.storage.from_("textbooks").move(storage_path, indexed_path)
+        self.update_state(state='PROCESSING', meta={'step': 'Finalizing', 'details': f'Updating storage and approval status for {file_name}...'})
+        
+        # FIX 2: Resilient storage move that won't kill the database update if it trips
+        try:
+            if storage_path.startswith("pending/"):
+                supabase_client.storage.from_("textbooks").move(storage_path, indexed_path)
+        except Exception as move_err:
+            print(f"[Storage Move Warning]: {move_err}")
 
-        supabase_client.table("Material Requests").update({
+        # FIX 3: Update database status to Approved & Indexed
+        update_res = supabase_client.table("Material Requests").update({
             "file_path": indexed_path,
             "status": "Approved & Indexed"
         }).eq("id", request_id).execute()
 
+        print(f"[INGESTION COMPLETE]: {file_name} updated to Approved & Indexed: {update_res.data}")
+
     except Exception as e:
+        # Roll back partial vectors
         try:
             supabase_client.table("Documents").delete().eq("metadata->>source", file_name).execute()
         except Exception:
             pass
-        return {"status": "FAILURE", "message": f"Processing crashed and rolled back: {str(e)}"}
+
+        # Update record so it does NOT stay stuck on Processing
+        supabase_client.table("Material Requests").update({
+            "status": "Rejected",
+            "reject_reason": f"Processing crashed: {str(e)}"
+        }).eq("id", request_id).execute()
+
+        # FIX 4: Raise exception so Celery marks task as FAILURE
+        raise RuntimeError(f"Processing crashed and rolled back: {str(e)}")
 
     return {
         "status": "Success", 

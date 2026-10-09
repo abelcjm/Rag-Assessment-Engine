@@ -555,9 +555,9 @@ def finalize_exam_session_task(self, results, exam_session_id):
             elif isinstance(res, dict) and "question" in res:
                 flattened_items.append(res)
 
+        # Update global_status only
         supabase_client.table("Exams").update({
-            "global_status": "Pending", 
-            "total_generated": len(flattened_items)
+            "global_status": "Pending"
         }).eq("exam_id", exam_session_id).execute()
 
         print(f"\n[SUCCESS] Exam session {exam_session_id} finalized with {len(flattened_items)} items.")
