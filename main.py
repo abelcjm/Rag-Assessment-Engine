@@ -9,9 +9,13 @@ from celery import chord
 from supabase import create_client, Client
 
 from celery_app import celery_app
-from hybrid_ingestion import batch_ingest_task
 
-# UPGRADED: Importing the new batch task
+# Safe import handling for both filename conventions
+try:
+    from hybrid_ingest import batch_ingest_task
+except ImportError:
+    from hybrid_ingestion import batch_ingest_task
+
 from generate_exam import (
     generate_assessment_batch_task,
     finalize_exam_session_task,
@@ -49,20 +53,21 @@ class BlueprintGenerationRequest(BaseModel):
     blueprint_id: str
     references: List[str] = ["All"]
     exam_session_id: str
-    custom_settings: Optional[List[str]] = None  # NEW: Global settings override
+    custom_settings: Optional[List[str]] = None
 
 class CustomBlock(BaseModel):
     competency: str
     bloom: str
     count: int
-    custom_settings: Optional[List[str]] = None  # NEW: Block-level settings override
+    setting: Optional[str] = None                   # Single setting from frontend
+    custom_settings: Optional[List[str]] = None     # Array of settings if provided
 
 class CustomBatchRequest(BaseModel):
     subject: str
     blocks: List[CustomBlock]
     references: List[str] = ["All"]
     exam_session_id: str
-    custom_settings: Optional[List[str]] = None  # NEW: Global settings override
+    custom_settings: Optional[List[str]] = None
 
 class RegenerateRequest(BaseModel):
     old_item_id: str
@@ -77,7 +82,7 @@ BLUEPRINT_MAP = {
 }
 
 
-# --- Vectorization Endpoints ---
+# --- Vectorization & Document Management Endpoints ---
 @app.post("/api/v1/vectorize")
 async def trigger_vectorize(request: VectorizeRequest):
     task = batch_ingest_task.delay(
@@ -87,15 +92,32 @@ async def trigger_vectorize(request: VectorizeRequest):
     )
     return {"message": f"Vectorization started for {request.storage_path}", "task_id": task.id}
 
+
 @app.delete("/api/v1/vectors")
 async def delete_vectors(request: DeleteVectorsRequest):
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase client not initialized.")
     try:
-        response = supabase.table("Documents").delete().eq("storage_path", request.storage_path).execute()
-        return {"message": f"Successfully deleted vectors for {request.storage_path}", "data": response.data}
+        file_name = os.path.basename(request.storage_path)
+
+        # Delete all document vectors matching storage_path or filename within metadata JSONB
+        response = (
+            supabase.table("Documents")
+            .delete()
+            .or_(f"metadata->>storage_path.eq.{request.storage_path},metadata->>source.eq.{file_name}")
+            .execute()
+        )
+        
+        deleted_count = len(response.data) if response.data else 0
+        print(f"[VECTOR PURGE] Successfully removed {deleted_count} chunks for {file_name}")
+        return {
+            "message": f"Successfully deleted {deleted_count} vectors for {file_name}",
+            "deleted_chunks": deleted_count
+        }
     except Exception as e:
+        print(f"[VECTOR PURGE ERROR]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/v1/task/{task_id}")
 async def get_task_status(task_id: str):
@@ -113,12 +135,12 @@ async def get_task_status(task_id: str):
     return response
 
 
-# --- Generation Endpoints using Chords ---
+# --- Exam Generation Endpoints ---
 @app.post("/api/v1/generate/blueprint")
 async def generate_blueprint_async(request: BlueprintGenerationRequest):
     blueprint_config = BLUEPRINT_MAP.get(str(request.blueprint_id))
     if not blueprint_config or not os.path.exists(blueprint_config["file"]):
-        raise HTTPException(status_code=404, detail="Invalid blueprint ID.")
+        raise HTTPException(status_code=404, detail="Invalid blueprint ID or blueprint file missing.")
 
     with open(blueprint_config["file"], 'r', encoding='utf-8') as f:
         blueprint_data = json.load(f)
@@ -126,9 +148,6 @@ async def generate_blueprint_async(request: BlueprintGenerationRequest):
     tasks = []
     for requirement in blueprint_data:
         count = requirement.get("items_to_generate", 0)
-        
-        # UPGRADED: No longer looping to create single-item tasks. 
-        # Fires one batch task per competency with items_to_generate passed directly.
         if count > 0:
             tasks.append(generate_assessment_batch_task.s(
                 subject=blueprint_config["subject"],
@@ -149,13 +168,19 @@ async def generate_blueprint_async(request: BlueprintGenerationRequest):
     
     return {"status": "queued", "message": "Parallel blueprint batch dispatched."}
 
+
 @app.post("/api/v1/generate/custom_batch")
 async def generate_custom_batch_async(request: CustomBatchRequest):
     tasks = []
     for block in request.blocks:
         if block.count > 0:
-            # Prioritize block-level custom settings over global custom settings
-            active_settings = block.custom_settings or request.custom_settings
+            # Resolve setting: priority is block-level single setting -> block-level list -> global settings
+            if block.setting:
+                active_settings = [block.setting]
+            elif block.custom_settings:
+                active_settings = block.custom_settings
+            else:
+                active_settings = request.custom_settings
             
             tasks.append(generate_assessment_batch_task.s(
                 subject=request.subject,
@@ -176,6 +201,7 @@ async def generate_custom_batch_async(request: CustomBatchRequest):
     
     return {"status": "queued", "message": "Parallel custom batch dispatched."}
 
+
 @app.post("/api/v1/generate/regenerate")
 async def regenerate_item(request: RegenerateRequest):
     if not supabase:
@@ -191,7 +217,6 @@ async def regenerate_item(request: RegenerateRequest):
         
         supabase.table("Mock Exam Items").update({"status": "ARCHIVED"}).eq("id", request.old_item_id).execute()
         
-        # UPGRADED: Uses the batch task but with items_to_generate=1 to regenerate a single question
         task = generate_assessment_batch_task.delay(
             subject=old_item.get("subject"),
             competency=old_item.get("competency"),
