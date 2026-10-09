@@ -428,7 +428,7 @@ def main():
         blueprint_data = json.load(f)
 
     # For a trial run, pick the first 3 requirements or run the whole file
-    trial_slice = blueprint_data[:3]
+    trial_slice = blueprint_data
     total_exam_items = []
 
     print(f"Starting Trial Run across {len(trial_slice)} blueprint specifications...")
