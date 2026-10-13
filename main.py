@@ -12,7 +12,7 @@ from celery_app import celery_app
 
 # Safe import handling for both filename conventions
 try:
-    from hybrid_ingest import batch_ingest_task
+    from hybrid_ingestion import batch_ingest_task
 except ImportError:
     from hybrid_ingestion import batch_ingest_task
 
@@ -80,6 +80,12 @@ BLUEPRINT_MAP = {
     "3": {"subject": "Psychological Assessment", "file": "psychological_assessment_psychometrician_blueprint.json"},
     "4": {"subject": "Developmental Psychology", "file": "developmental_psychology_blueprint.json"}
 }
+
+
+@app.get("/health")
+@app.get("/api/v1/health")
+async def health_check():
+    return {"status": "ok", "service": "Psychometric RAG Assessment Engine"}
 
 
 # --- Vectorization & Document Management Endpoints ---
@@ -213,18 +219,19 @@ async def regenerate_item(request: RegenerateRequest):
         old_item = item_resp.data[0]
         
         exam_resp = supabase.table("Exams").select("references").eq("exam_id", request.exam_session_id).execute()
-        references = exam_resp.data[0].get("references", ["All"]) if exam_resp.data else ["All"]
+        raw_refs = exam_resp.data[0].get("references") if exam_resp.data else None
+        references = raw_refs if isinstance(raw_refs, list) and len(raw_refs) > 0 else ["All"]
         
-        supabase.table("Mock Exam Items").update({"status": "ARCHIVED"}).eq("id", request.old_item_id).execute()
-        
+        # Dispatch Celery task targeting the exact row ID for in-place replacement
         task = generate_assessment_batch_task.delay(
-            subject=old_item.get("subject"),
-            competency=old_item.get("competency"),
-            target_blooms_level=old_item.get("blooms_level"),
+            subject=old_item.get("subject") or "General Scope",
+            competency=old_item.get("competency") or "General Competency",
+            target_blooms_level=old_item.get("blooms_level") or "Understanding",
             items_to_generate=1,
             selected_references=references,
             exam_session_id=request.exam_session_id,
-            custom_settings=None
+            custom_settings=None,
+            replace_item_id=request.old_item_id
         )
         return {"message": "Regeneration task queued successfully.", "task_id": task.id}
     except Exception as e:

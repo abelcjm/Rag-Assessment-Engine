@@ -252,7 +252,7 @@ def rewrite_search_query(subject: str, competency: str, failed_query: str) -> st
     except Exception:
         return f"{subject} {competency} core concepts principles models"
 
-def save_to_supabase(item: dict, session_id: str):
+def save_to_supabase(item: dict, session_id: str, replace_item_id: str = None):
     try:
         payload = {
             "exam_session_id": session_id,
@@ -273,9 +273,14 @@ def save_to_supabase(item: dict, session_id: str):
             "status": item.get("status", "PASSED"),
             "calibration_attempts": item.get("calibration_attempts", 1)
         }
-        response = supabase_client.table("Mock Exam Items").insert(payload).execute()
-        if response.data:
-            print(f"[DB-SUCCESS] Item saved with ID: {response.data[0]['id']}")
+        
+        if replace_item_id:
+            response = supabase_client.table("Mock Exam Items").update(payload).eq("id", replace_item_id).execute()
+            print(f"[DB-SUCCESS] Item {replace_item_id} successfully replaced in place.")
+        else:
+            response = supabase_client.table("Mock Exam Items").insert(payload).execute()
+            if response.data:
+                print(f"[DB-SUCCESS] Item saved with ID: {response.data[0]['id']}")
     except Exception as e:
         print(f"[DB-ERROR] Failed to save item to Supabase: {e}")
 
@@ -283,7 +288,9 @@ def save_to_supabase(item: dict, session_id: str):
 @shared_task(bind=True)
 def generate_assessment_batch_task(self, subject: str, competency: str, target_blooms_level: str,
                                    items_to_generate: int, selected_references: list, exam_session_id: str,
-                                   custom_settings: list = None):
+                                   custom_settings: list = None, replace_item_id: str = None):
+    
+    target_blooms_level = target_blooms_level or "Understanding"
     MAX_BATCH_SIZE = 4
     sub_batch_counts = []
     remaining = items_to_generate
@@ -524,7 +531,7 @@ COGNITIVE LEVEL INSTRUCTION (LOTS - {target_blooms_level}):
                             raw_item["evaluation_metrics"]["context_relevance"] = round(cr_score, 3)
 
                     for raw_item in parsed_batch:
-                        save_to_supabase(raw_item, exam_session_id)
+                        save_to_supabase(raw_item, exam_session_id, replace_item_id)
                         all_processed_items.append(raw_item)
                     break
                 else:
