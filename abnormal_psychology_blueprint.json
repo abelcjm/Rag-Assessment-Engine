@@ -1,0 +1,182 @@
+[
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "A.1.1 Recognize normal and abnormal manifestations of behavior.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "A.1.2 Assess abnormal manifestations of behaviors based on the social contexts.",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.1 Differentiate Anxiety Disorders from other psychological disorders",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.2 Differentiate Trauma-and-Stressor Related Disorders from other psychological disorders",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.3 Differentiate Obsessive-Compulsive Related Disorders from other psychological disorders",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.4 Explain Somatic Symptom and Related Disorders from other disorders",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.5 Evaluate Dissociative Disorder from other psychological disorders",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.6 Illustrate Depressive Disorders from other psychological disorders",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.7 Explain Eating and Sleep Disorder from other disorders",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.8 Evaluate the different Sexual Dysfunctions, Paraphilic Disorders and Gender Dysphoria",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.9 Explain Substance-Related and Addictive Disorder from other psychological disorders",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.10 Explain Impulse Control Disorders from other disorders",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.11 Illustrate the different Personality Disorders and with the other psychopathologies of personalities",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.12 Illustrate Schizophrenia and Other Psychotic Disorders from other psychological disorders",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.13 Identify the different Neurodevelopmental Disorders based on DSM-5",
+        "bloom_level": "Remembering",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "B.1.14 Identify the different Neurocognitive Disorders based on DSM-5",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "C.1.1 Illustrate the genetic contributions in the development of mental disorders.",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "C.1.2 Illustrate the role of biological and neurological bases in the development of psychological disorders.",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "C.1.3 Illustrate the role of learning in the development of psychological disorders.",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "C.1.4 Explain the cognitive theories in the development of psychological disorders",
+        "bloom_level": "Understanding",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "C.1.5 Attribute the diathesis-stress model in the development of psychological disorders",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "C.1.6 Analyze the role of gene-environment interaction in the development of psychological disorders",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "C.1.7 Assess the role of culture, social interactions, and interpersonal factors in the development of psychological disorders.",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "D.1.1 Explain the different psychological interventions used for the treatment of psychological disorders.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "D.1.2 Illustrate the application of psychological interventions for the treatment of psychological disorders.",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "D.1.3 Evaluate the efficacy of the psychological interventions for the treatment of psychological disorders.",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "E.1.1 Identify socio-cultural factors that may impact diagnosing of mental disorders.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "E.2.1 Apply appropriate ethical principles and standards of practice in diagnosing abnormal behavior.",
+        "bloom_level": "Applying",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "F.1.1 Recognize the different Issues and concerns in various settings (educational, occupational, community) on the impact of (COVID19-) on the mental health condition of people and the challenges of the implementation of RA11036.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Abnormal Psychology",
+        "competency": "F.1.2 Evaluate the impact of global health crisis (COVID-19) and other mental health conditions on the implementation of RA11036.",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 5
+    }
+]

@@ -15,14 +15,8 @@ __pycache__/
 # Environment Variables
 .env
 
-# Exam Blueprint
-industrial_organizational psychology_blueprint.json
-psychological_assessment_psychometrician_blueprint.json
-developmental_psychology_blueprint.json
-abnormal_psychology_blueprint.json
-
-# Docker files
-docker-compose.yml
-Dockerfile
-
 celerybeat-schedule
+
+# Mock exam and trial output files
+*_trial_exam_*.json
+*_items_*.json

@@ -1,33 +1,30 @@
 import os
-import torch
+import re
 import gc
+import torch
+from dotenv import load_dotenv
 from supabase.client import create_client, Client
 from langchain_community.vectorstores import SupabaseVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 from sentence_transformers import CrossEncoder
-from dotenv import load_dotenv
 
 load_dotenv()
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
+os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
-# 1. Global Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("CRITICAL: Supabase URL or Key is missing from environment variables.")
-
-# 2. Global Initialization
-print(f"Loading embedding model on {DEVICE}...")
+    raise ValueError("CRITICAL: Supabase URL or Key missing from environment.")
 
 embedding_model = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-base-en-v1.5", 
-    model_kwargs={'trust_remote_code': True, 'device': DEVICE},
-    encode_kwargs={'normalize_embeddings': True}
+    model_name="BAAI/bge-base-en-v1.5",
+    model_kwargs={"trust_remote_code": True, "device": DEVICE},
+    encode_kwargs={"normalize_embeddings": True}
 )
 
-print(f"Connecting to Supabase pgvector at {SUPABASE_URL}...")
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 vector_db = SupabaseVectorStore(
     client=supabase_client,
@@ -36,55 +33,70 @@ vector_db = SupabaseVectorStore(
     query_name="match_documents"
 )
 
-print(f"Loading cross-encoder reranker on {DEVICE}...")
-# bge-reranker-v2-m3 can handle sequence lengths up to 8192, which safely accommodates our new 1000-token chunks
-reranker_model = CrossEncoder('BAAI/bge-reranker-v2-m3', device=DEVICE)
+# Cross-Encoder using model_kwargs to resolve the deprecation warning
+reranker_model = CrossEncoder(
+    "BAAI/bge-reranker-v2-m3",
+    device=DEVICE,
+    max_length=512,
+    model_kwargs={"torch_dtype": torch.float16 if DEVICE == "cuda" else torch.float32}
+)
 
-def retrieve_and_rerank(query, top_k=20, final_k=7, reference_filter=["All"]):
+def _normalize_tokens(text: str) -> set:
+    """Extract lowercase alphanumeric tokens, ignoring underscores, commas, and punctuation."""
+    return set(re.findall(r'[a-zA-Z0-9]+', text.lower()))
+
+def retrieve_and_rerank(query: str, top_k: int = 40, final_k: int = 7, reference_filter: list = None):
     """
-    Executes a two-stage retrieval pipeline: dense vector search followed by cross-encoder reranking.
-    Optimized to handle larger, semantically complete chunks.
+    Two-stage retrieval pipeline:
+    1. Vector similarity search against Supabase pgvector.
+    2. Resilient token-overlap filtering for sanitized/prefixed textbook filenames.
+    3. Batched FP16 Cross-Encoder reranking on RTX GPU.
     """
-    print(f"Step 1: Retrieving candidates for query: '{query}'")
-    
-    search_filter = {}
-    fetch_k = top_k
-    
-    if "All" not in reference_filter and len(reference_filter) == 1:
-        search_filter = {"source": reference_filter[0]}
-        print(f"        Applying DB-level metadata filter: {search_filter}")
-    elif "All" not in reference_filter and len(reference_filter) > 1:
-        # UPGRADED: Scaled the fetch multiplier to ensure enough large semantic chunks 
-        # survive the Python-level metadata filter.
-        fetch_k = top_k * 5 
-        
-    initial_results = vector_db.similarity_search(query, k=fetch_k, filter=search_filter)
-    
-    # Python-level filtering for multiple textbooks
-    if "All" not in reference_filter and len(reference_filter) > 1:
-        initial_results = [doc for doc in initial_results if doc.metadata.get("source") in reference_filter]
-        initial_results = initial_results[:top_k]
-    
+    if reference_filter is None:
+        reference_filter = ["All"]
+
+    # Fetch initial pool of candidates from pgvector
+    initial_results = vector_db.similarity_search(query, k=top_k)
+
     if not initial_results:
-        print("\n--- Retrieval Warning: No chunks found matching query/filter. ---")
         return []
-        
-    print(f"Step 2: Reranking {len(initial_results)} candidates down to top {final_k} chunks...")
-    
-    # CrossEncoder pairs the query with our new, larger chunks
+
+    # In-memory filter with normalized token matching
+    if "All" not in reference_filter:
+        filtered = []
+        for doc in initial_results:
+            source_raw = doc.metadata.get("source", "")
+            source_tokens = _normalize_tokens(source_raw)
+
+            matched = False
+            for ref in reference_filter:
+                ref_tokens = _normalize_tokens(ref)
+                # Match if at least 3 key words from the target title are found in the source string
+                if ref_tokens and len(ref_tokens.intersection(source_tokens)) >= min(3, len(ref_tokens)):
+                    matched = True
+                    break
+
+            if matched:
+                filtered.append(doc)
+        initial_results = filtered
+
+    if not initial_results:
+        return []
+
+    # Batched FP16 Cross-Encoder Reranking
     pairs = [[query, doc.page_content] for doc in initial_results]
-    scores = reranker_model.predict(pairs)
-    
-    scored_results = list(zip(initial_results, scores))
-    scored_results.sort(key=lambda x: x[1], reverse=True)
-    
-    best_chunks = [doc for doc, score in scored_results[:final_k]]
-    
-    # CRITICAL: Because our chunks are now up to 1000 tokens, the CrossEncoder will consume significantly
-    # more VRAM during prediction. We must aggressively clear the cache before passing back to Gemini.
-    if DEVICE == 'cuda':
+
+    with torch.inference_mode():
+        scores = reranker_model.predict(
+            pairs,
+            batch_size=8 if DEVICE == "cuda" else 4,
+            show_progress_bar=False
+        )
+
+    scored_results = sorted(zip(initial_results, scores), key=lambda x: x[1], reverse=True)
+    best_chunks = [doc for doc, _ in scored_results[:final_k]]
+
+    if DEVICE == "cuda":
         torch.cuda.empty_cache()
-        gc.collect()
-        
-    print(f"Successfully selected top {len(best_chunks)} chunks.")
+
     return best_chunks

@@ -1,0 +1,164 @@
+[
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "A.1.1 Describe the different organizational theories, models and concepts",
+        "bloom_level": "Understanding",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "A.1.2 Apply the different theories of organizations to the overall understanding of human behavior in an organizational setting",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "A.1.2 Determine the focus and analyze the differences between these Organization Theories: Classical Organization Theory, Neo-Classical Organizational Theory, Modern Organizational Theory, Contingency Theory, Motivation Theory and Open Systems Theory",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "A.1.2 Determine the focus and analyze the differences between these Organization Theories: Classical Organization Theory, Neo-Classical Organizational Theory, Modern Organizational Theory, Contingency Theory, Motivation Theory and Open Systems Theory",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "A.1.3 Examine the importance of organization theory, particularly on how organizations use that knowledge to help them improve organizational structure and design, leadership, managerial styles, group behavior, motivation, communication, operational efficiency and organizational culture.",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "B.2.1 Evaluate the value and importance of knowing & understanding the various organizational models and systems",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "B.2.2 Recognize the pros and cons of the different types of organizational structures: functional, multi-divisional, flat, matrix, team, network, and hierarchical structures.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 6
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "B.2.3 Define the elements that create an organizational structure and their distinct relationships: job design, departmentation, delegation, span of control and chain of command.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "B.2.4 Apply your understanding of organizational design to appreciate organizational roles and performance accountability",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "B.2.5 Explain the importance of aligning the organizational structure with the business Strategy",
+        "bloom_level": "Understanding",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "B.2.6 Apply your understanding of the 4 business elements that must be aligned to ensure profitable performance and business success.",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "C.3.1 Differentiate: (a) Human Resource Development (HRD) and Human Resource Mgmt. (HRM) (b) Human Resource Dev't (HRD) & Organizational Development (OD) (c) HRD & Employee Training",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "C.3.2 Identify the activities involved in Human Resource Development",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "C.3.3 Examine the scope, coverage, and processes across the different areas of Human Resource Development (training, learning, career development, talent management, performance appraisal, employee engagement and empowerment)",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "C.3.3 Examine the scope, coverage, and processes across the different areas of Human Resource Development (training, learning, career development, talent management, performance appraisal, employee engagement and empowerment)",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "C.3.4 Analyze the organizational activities involved in Human Resources Management (manpower planning, staffing, developing, monitoring, maintaining, managing relationship and evaluating)",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 8
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "C.3.5 Compare the role of the Human Resource Manager and the Human Resource Development Manager in an Organization",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "D.4.1 Explain the importance and impact of team dynamics in an organization",
+        "bloom_level": "Applying",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "D.4.2 Identify the stages of team development",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "D.4.2 Examine group processes that affect team effectiveness",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "D.4.4 Identify the common problems that occur in teams",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "D.4.5 Apply your knowledge of team dynamics to address team problems and improve team performance",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "E.5.1 Distinguish the difference between: (a) Organizational Change & Organizational Dev't. (b) Organizational Dev't & Organizational Transformation",
+        "bloom_level": "Applying",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "E.5.2 Analyze the different factors driving organizational change",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "E.5.3 Identify the different types of large scale organizational changes",
+        "bloom_level": "Understanding",
+        "items_to_generate": 6
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "E.5.4 Evaluate the different types of Organizational Interventions used to enhance organizational effectiveness, employee well-being and productivity",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Industrial-Organizational Psychology",
+        "competency": "E.5.5 Examine the different strategies and techniques organizations use to manage change, and/or cope with change to achieve organizational efficiency",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    }
+]

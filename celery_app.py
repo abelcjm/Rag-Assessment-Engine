@@ -13,20 +13,16 @@ celery_app = Celery(
     include=["hybrid_ingestion", "generate_exam"] 
 )
 
-# Configure routing, concurrency limits, tracking, and UPGRADED time limits
-# celery_app.py
 celery_app.conf.update(
     task_track_started=True,
     result_extended=True,
     worker_prefetch_multiplier=1, 
-    
-    # INCREASED: Allow up to 30 minutes for heavy textbook ingestion
-    task_soft_time_limit=1800,   
-    task_time_limit=1860,        
+    task_soft_time_limit=10800,   
+    task_time_limit=11400,        
     task_acks_late=True         
 )
 
-# --- CELERY BEAT SCHEDULE FOR NEXT.JS DASHBOARD ---
+# Celery beat schedule
 celery_app.conf.beat_schedule = {
     'worker-health-heartbeat': {
         'task': 'generate_exam.heartbeat_task',

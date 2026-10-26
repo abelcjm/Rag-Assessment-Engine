@@ -1,0 +1,326 @@
+[
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.1.a Ascertain psychometric properties essential in constructing tests",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.1.b Ascertain psychometric properties essential in selecting tests",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.1.c Ascertain psychometric properties essential in interpreting tests",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.2 Describe the value of different psychometric properties and principles",
+        "bloom_level": "Understanding",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.3 Justify the reason for accepting or rejecting instruments and tools based on psychometric properties",
+        "bloom_level": "Applying",
+        "items_to_generate": 9
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.4 Manifest capacity to interpret and utilize test results based on the psychometric properties of the assessment instrument",
+        "bloom_level": "Applying",
+        "items_to_generate": 9
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.5.a Examine the ways psychometric principles are applied in the interpretation of results",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.5.b Examine the ways psychometric principles are applied in the usage of assessment outcomes.",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "A.6 Evaluate the application of psychometric principles in the development of assessment instruments",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.1 Recognize statistics applied in research studies on tests and test development",
+        "bloom_level": "Remembering",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.2.a Explain methods used in research studies and test construction.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.2.b Explain statistics used in research studies and test construction.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.3.a Apply the appropriate research methods and statistics in test development",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.3.b Apply the appropriate research methods and statistics in test standardization",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.4.a Analyze the research and statistical methods applied in test development",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.4.b Analyze the research and statistical methods applied in test standardization",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.4.c Analyze the research and statistical methods applied in studies on tests and their findings",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "B.5 Appraise the appropriateness of the statistics and methods of research applied for a given goal",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "C.1.a State purposes of given assessment methods",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "C.1.b State purposes of given assessment tools",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "C.2.a Describe benefits derived from different assessment methods",
+        "bloom_level": "Understanding",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "C.2.b Describe benefits derived from different assessment tools",
+        "bloom_level": "Understanding",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "C.3 Determine appropriate selection tools for given populations and settings.",
+        "bloom_level": "Applying",
+        "items_to_generate": 4
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "C.4 Analyze the strengths and limitations of assessment tools",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "C.5 Assess the appropriateness of selected assessment tools and instruments",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.1.a Identify appropriate assessment methods for specific purposes",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.1.b Identify appropriate assessment tools for specific purposes",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.2.a Clarify rationale for selecting assessment methods",
+        "bloom_level": "Understanding",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.2.b Clarify rationale for selecting tools for specific populations and purposes.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.3.a Specify areas of assessment and/or tools needed for specific populations",
+        "bloom_level": "Applying",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.3.b Specify areas of assessment and/or tools needed for settings",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.3.c Specify areas of assessment and/or tools needed for circumstances",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.4.a Determine the best assessment methods and/or tools for Individuals",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.4.b Determine the best assessment methods and/or tools for Groups",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.5 Evaluate whether selected methods and instruments yield the needed information",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "D.6 Recommend methods and instruments required for specific needs and goals",
+        "bloom_level": "Creating",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.1.a Detect errors in test selection",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.1.b Detect errors in test administration",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.1.c Detect errors in test scoring",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.2 Show recognition of impact of errors in test administration, scoring, and interpretation",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.3.a Respond appropriately to challenges in test usage",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.3.b Respond appropriately to challenges in test administration",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.3.c Respond appropriately to challenges in test scoring",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.3.d Respond appropriately to challenges in test interpretation",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.4.a Explore anomaly in test administration",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.4.b Explore anomaly in test interpretation",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.4.c Explore anomaly in test usage",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "E.5 Appraise usefulness of tests under varying conditions of test administration, scoring, and interpretation",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "F.1.a Identify ethical principles that pertain to test Interpretation",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "F.1.b Identify ethical principles that pertain to test Usage",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "F.2 Expound on what makes a situation or activity a violation of ethics and standard of good practice",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "F.3 Appropriately handle different situations that may challenge the application of ethical principles and standards",
+        "bloom_level": "Applying",
+        "items_to_generate": 7
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "F.4 Explore the different possibilities for avoiding ethical violations",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Psychological Assessment",
+        "competency": "F.5 Evaluate ethical appropriateness of the way psychometric matters had been handled",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 3
+    }
+]

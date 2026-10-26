@@ -1,0 +1,200 @@
+[
+    {
+        "subject": "Developmental Psychology",
+        "competency": "A.1.1 Explain the role of heredity and environment in human growth and development.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "A.1.2 Illustrate the influence of heredity and environment on the development of persons",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "A.1.3 Identify the characteristics that pertain to heredity and environment.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "B.1.1 Identify the ethical consideration of various research methods in developmental psychology.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "B.2.1 Recognize the different basic research designs in studying hurman development.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "B.2.2 Differentiate cross-sectional and longitudinal studies in conducting research investigation in human development.",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 1
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.1 Assess the development of personality in the light of psychosexual theory of Freud.",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.2 Illustrate and evaluate the development of personality in the light of psychosocial theory of Erikson.",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.2 Illustrate and evaluate the development of personality in the light of psychosocial theory of Erikson.",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.3 Illustrate the cognitive development of a person across the life span based on Piaget.",
+        "bloom_level": "Applying",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.4 Differentiate and illustrate the moral development of a person across the life span based on Kohlberg.",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.5 Illustrate the impact of ecological model in the development of personality based on Bronfenbrenner.",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.6 Apply the socio-cultural theory in the development of personality of Vygotsky.",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.7 Illustrate the role of attachment in the development of personality and other human attributes based on Ainsworth and Mahler.",
+        "bloom_level": "Applying",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.8 Illustrate the theory of identity formation during adolescence period based on Marcia.",
+        "bloom_level": "Applying",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.9 Compare the different learning theories in explaining the development of personality and other human attributes based on behaviorism and social learning.",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "C.1.10 Analyze the evolutionary theory of development of Wilson.",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "D.1.1 Explain appropriate developmental principles in the study of life-span development.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "D.1.1 Explain appropriate developmental principles in the study of life-span development.",
+        "bloom_level": "Applying",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "E.1.1 Explain the critical Issues pertaining to heredity and environmental influences during prenatal development.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "E.1.2 Illustrate the critical issues related to physical, cognitive, socio-emotional development during prenatal development.",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "E.1.3 Assess the developmental issues concerning physical, cognitive, and socio-emotional development during childhood, adolescence, and adulthood stages of development.",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "E.1.4 Identify critical issues concerning death and bereavement.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "E.2.1 Explain the expected developmental tasks in physical, cognitive, and socio-emotional during childhood, adolescence, and adulthood stages of development.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "E.2.2 Assess the expected developmental tasks in physical, cognitive, and socio-emotional during childhood and adolescence stage of development.",
+        "bloom_level": "Evaluating",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "E.2.3 Illustrate developmental tasks in physical, cognitive, and socio-emotional expected during adulthood stage of development.",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "F.1.1 Explain the challenges faced during prenatal and childhood stages of development.",
+        "bloom_level": "Understanding",
+        "items_to_generate": 3
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "F.1.2 Illustrate the challenges faced during the adolescence and adulthood stages of development.",
+        "bloom_level": "Applying",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "F.1.3 Differentiate the challenges concerning prenatal, childhood, adolescence, and adulthood.",
+        "bloom_level": "Analyzing",
+        "items_to_generate": 5
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "F.1.4 Identify the challenges of coping with death of another person.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 2
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "F.2.1 Point out the expected developmental milestones on physical, cognitive, and socio-emotional development during childhood, adolescence, and adulthood.",
+        "bloom_level": "Remembering",
+        "items_to_generate": 6
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "F.2.2 Illustrate developmental milestones on physical, cognitive, and socio-emotional development during childhood, adolescence, and adulthood stages of development.",
+        "bloom_level": "Applying",
+        "items_to_generate": 6
+    },
+    {
+        "subject": "Developmental Psychology",
+        "competency": "F.2.3 Illustrate issues involved in decisions about death.",
+        "bloom_level": "Applying",
+        "items_to_generate": 3
+    }
+]

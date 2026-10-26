@@ -1,0 +1,102 @@
+services:
+  # 1. Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: rag_redis
+    restart: always
+
+  # 2. FastAPI Web Server
+  api:
+    build: .
+    container_name: rag_api
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: always
+
+  # 3. CPU Worker (Default)
+  worker:
+    build: .
+    container_name: rag_celery_worker
+    command: celery -A celery_app worker --loglevel=info --concurrency=3 --max-tasks-per-child=1
+    volumes:
+      - .:/app
+      - huggingface_cache:/root/.cache/huggingface
+    shm_size: '2gb'
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: always
+    profiles: ["cpu"]
+
+  # 4. GPU Worker
+  worker-gpu:
+    build: .
+    container_name: rag_celery_worker_gpu
+    command: celery -A celery_app worker --loglevel=info -P solo
+    volumes:
+      - .:/app
+      - huggingface_cache:/root/.cache/huggingface
+    shm_size: '4gb'
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - DOCLING_DEVICE=cuda
+      - OMP_NUM_THREADS=4
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+    depends_on:
+      - redis
+    restart: always
+    profiles: ["gpu"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # 5. Cloudflare Tunnel
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: rag_tunnel
+    command: tunnel --url http://api:8000
+    restart: always
+    depends_on:
+      - api
+  
+  # 6. Celery Beat Heartbeat Scheduler
+  celery_beat:
+    build: .
+    container_name: rag_celery_beat
+    command: celery -A celery_app beat --loglevel=info
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: always
+
+volumes:
+  huggingface_cache:
