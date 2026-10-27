@@ -1,6 +1,6 @@
 # BLEPP Automated Assessment Engine (RAG Backend)
 
-An enterprise-grade Retrieval-Augmented Generation (RAG) backend designed for the Philippine Psychometrician Licensure Examination (BLEPP). The engine parses complex psychometrics textbooks using a hybrid layout parser, indexes chunks into Supabase `pgvector`, executes two-stage dense retrieval with cross-encoder reranking, and synthesizes psychometrically sound assessment items evaluated against automated RAGAS faithfulness gates.
+A Retrieval-Augmented Generation (RAG) backend designed for the Philippine Psychometrician Licensure Examination (BLEPP). The engine parses complex psychometrics textbooks using a hybrid layout parser, indexes chunks into Supabase `pgvector`, executes two-stage dense retrieval with cross-encoder reranking, and synthesizes psychometrically sound assessment items evaluated against automated RAGAS faithfulness gates.
 
 ---
 
